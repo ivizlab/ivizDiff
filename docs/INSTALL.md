@@ -1,89 +1,74 @@
-# ivizDiff — Installation & Setup Guide
+# iVizDiff — Installation Guide
 
 ---
 
-## Updating an Existing 5090 Machine (Lab)
+## Which section do you need?
 
-If the lab machine already has a working ivizDiff install, you just need to pull the latest code.
-
-Open a terminal in the project folder and run:
-
-```bash
-cd C:\_proj\iVizDiff
-git pull mine main
-```
-
-If `mine` remote is not set up yet on that machine, add it first:
-
-```bash
-git remote add mine https://github.com/ivizlab/ivizDiff.git
-git pull mine main
-```
-
-Then rebuild the frontend:
-
-```bash
-cd demo/realtime-img2img/frontend
-npm run build
-```
-
-That's it. No Python reinstall needed — all changes are code only.
-
-> If you get merge conflicts, the safest approach is:
-> `git fetch mine && git reset --hard mine/main`
-> This discards any local changes and takes the latest from GitHub.
+| Situation | Go to |
+|---|---|
+| RTX 5090 / Blackwell GPU | [Section A — RTX 5090 Fresh Install](#section-a--rtx-5090-fresh-install) |
+| RTX 3090 / 4090 / Ampere-Ada GPU | [Section B — RTX 3090 / 4090 Install](#section-b--rtx-3090--4090-install) |
+| Already installed, pulling updates | [Updating an Existing Install](#updating-an-existing-install) |
 
 ---
 
-## Fresh Install — RTX 3090 (24GB, Ampere)
+## Prerequisites (all GPUs)
 
-### Prerequisites
+Install these before starting:
 
-- Windows 10/11
-- NVIDIA driver 525+ (check with `nvidia-smi`)
-- CUDA Toolkit 12.1 — download from nvidia.com/cuda-downloads
-- Anaconda or Miniconda
-- Node.js 18+ — download from nodejs.org
-- Git — download from git-scm.com
+- **Windows 10 or 11**
+- **NVIDIA driver 525+** — check with `nvidia-smi` in a terminal
+- **Anaconda or Miniconda** — [miniconda.anaconda.org](https://docs.anaconda.com/miniconda/)
+- **Node.js 18+** — [nodejs.org](https://nodejs.org)
+- **Git** — [git-scm.com](https://git-scm.com)
 
-### 1. Clone the repo
+---
+
+## Section A — RTX 5090 Fresh Install
+
+> The RTX 5090 uses the Blackwell architecture (sm_120). It requires a specific
+> PyTorch build and **xformers must never be installed** — it will corrupt your environment.
+
+### A1. Clone the repo
 
 ```bash
-git clone https://github.com/ivizlab/ivizDiff.git C:\_proj\iVizDiff
+git clone https://github.com/YOUR_USERNAME/iVizDiff.git C:\_proj\iVizDiff
 cd C:\_proj\iVizDiff
 ```
 
-### 2. Create conda environment
+### A2. Create conda environment
 
 ```bash
 conda create -n sdiff python=3.11 -y
 conda activate sdiff
 ```
 
-### 3. Install PyTorch (3090 version — CUDA 12.1)
+### A3. Install PyTorch (Blackwell / CUDA 12.8)
 
 ```bash
-pip install torch==2.3.0+cu121 torchvision==0.18.0+cu121 torchaudio==2.3.0+cu121 --extra-index-url https://download.pytorch.org/whl/cu121
+pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 torchaudio==2.7.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
 ```
 
-Verify:
+Verify — this must print `2.7.0+cu128` and `True`:
 ```bash
 python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
 ```
-Should print `2.3.0+cu121` and `True`.
 
-### 4. Install project dependencies
+> **Warning:** Never run `pip install torch` again after this — it will overwrite the cu128 build.
+> If PyTorch ever gets broken, reinstall it with the exact command above.
+
+### A4. Install project dependencies
 
 ```bash
-cd demo/realtime-img2img
-pip install -r requirements.txt
+pip install -r requirements-5090.txt
+pip install -e .
 ```
 
-### 5. Install TensorRT (optional but recommended for 3090)
+### A5. Download models
 
-TensorRT gives a significant speedup on Ampere. Follow the instructions in `docs/TENSORRT_INSTALL.md` (or skip and use `acceleration: none` in your config — see below).
+See the [Models section](#models) below.
 
-### 6. Build the frontend
+### A6. Build the frontend
 
 ```bash
 cd frontend
@@ -92,91 +77,202 @@ npm run build
 cd ..
 ```
 
-### 7. Download models
-
-Models are large and not in the repo. You need:
-
-| Model | Size | Path |
-|---|---|---|
-| SD1.5 base (diffusers format) | ~4GB | `C:\AI\models\` |
-| IPAdapter sd15 | ~300MB | `C:\AI\models\ipadapter\models\ip-adapter_sd15.bin` |
-| ControlNet tile | ~1.5GB | `models/controlnet/sd15_tile/` |
-
-Ask the lab for model files or see the shared drive.
-
-### 8. Config for 3090
-
-Copy the default config and set acceleration:
+### A7. Start
 
 ```bash
-cp configs/NewStart.yaml configs/3090.yaml
+start.cmd
 ```
 
-Edit `configs/3090.yaml` — the key line:
-
-```yaml
-acceleration: tensorrt   # use this if TensorRT is installed
-# acceleration: none     # use this if TensorRT is NOT installed
-```
-
-If using `acceleration: none`, expect **~8–12 fps** instead of 20–30fps. Still usable.
-
-### 9. Start the system
-
+Or directly:
 ```bash
 conda activate sdiff
-cd C:\_proj\iVizDiff\demo\realtime-img2img
-python main.py --config ../../configs/3090.yaml
+cd C:\_proj\iVizDiff
+python main.py
 ```
 
-Open browser at `http://localhost:7860`.
+Open `http://localhost:7860` in your browser.
 
 ---
 
-## Day-to-Day Workflow (all machines)
+## Section B — RTX 3090 / 4090 Install
 
-### Getting the latest updates from home
+### B1. Clone the repo
+
+```bash
+git clone https://github.com/YOUR_USERNAME/iVizDiff.git C:\_proj\iVizDiff
+cd C:\_proj\iVizDiff
+```
+
+### B2. Create conda environment
+
+```bash
+conda create -n sdiff python=3.11 -y
+conda activate sdiff
+```
+
+### B3. Install PyTorch (CUDA 12.1)
+
+```bash
+pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+```
+
+Verify:
+```bash
+python -c "import torch; print(torch.__version__); print(torch.cuda.is_available())"
+```
+
+### B4. Install project dependencies
+
+```bash
+pip install -r requirements-3090.txt
+pip install -e .
+```
+
+### B5. Download models
+
+See the [Models section](#models) below.
+
+### B6. Build the frontend
+
+```bash
+cd frontend
+npm install
+npm run build
+cd ..
+```
+
+### B7. Start
+
+```bash
+start.cmd
+```
+
+Open `http://localhost:7860` in your browser.
+
+---
+
+## Models
+
+Models are large files and are not included in the repo. You need to download them separately and place them in the correct folders.
+
+### Model folder structure
+
+```
+iVizDiff/
+├── models/
+│   ├── sd/
+│   │   └── PerfectPhotonV2.1/     ← or any SD1.5 diffusers model
+│   ├── ipadapter/
+│   │   └── models/
+│   │       ├── ip-adapter_sd15.bin
+│   │       └── image_encoder/     ← full folder from HuggingFace
+│   └── controlnet/
+│       └── sd15_tile/             ← full folder from HuggingFace
+└── engines/                       ← TensorRT engines, compiled automatically on first run
+```
+
+---
+
+### 1. Base diffusion model (SD1.5)
+
+iVizDiff requires an **SD1.5 model in diffusers format**.
+
+> **NOT compatible with SDXL, SD2, or SD3 models.**
+
+**Option A — Free model (downloads automatically, no files needed):**
+
+Edit `configs/NewStart.yaml` and change `model_id` to:
+```yaml
+model_id: "runwayml/stable-diffusion-v1-5"
+```
+This downloads ~4GB from HuggingFace on first run.
+
+**Option B — PerfectPhotonV2 (the lab default, better quality):**
+
+1. Download from CivitAI: search "PerfectPhoton V2" on [civitai.com](https://civitai.com)
+2. The CivitAI download is a `.safetensors` file — convert it to diffusers format:
+   ```bash
+   python -c "
+   from diffusers import StableDiffusionPipeline
+   pipe = StableDiffusionPipeline.from_single_file('path/to/PerfectPhotonV2.1.safetensors')
+   pipe.save_pretrained('models/sd/PerfectPhotonV2.1')
+   "
+   ```
+3. The `configs/NewStart.yaml` already points to `models/sd/PerfectPhotonV2.1` — no changes needed.
+
+Any other SD1.5 diffusers-format model placed in `models/sd/` will work — just update `model_id` in your config.
+
+---
+
+### 2. IPAdapter
+
+1. Go to [huggingface.co/h94/IP-Adapter](https://huggingface.co/h94/IP-Adapter)
+2. Download:
+   - `models/ip-adapter_sd15.bin` → place at `models/ipadapter/models/ip-adapter_sd15.bin`
+   - `models/image_encoder/` (the whole folder) → place at `models/ipadapter/models/image_encoder/`
+
+The `configs/NewStart.yaml` already points to these paths — no changes needed.
+
+---
+
+### 3. ControlNet (sd15_tile)
+
+1. Go to [huggingface.co/lllyasviel/control_v11f1e_sd15_tile](https://huggingface.co/lllyasviel/control_v11f1e_sd15_tile)
+2. Download the full repository (all files) into `models/controlnet/sd15_tile/`
+
+**Or** let it download automatically — edit `configs/NewStart.yaml` and change the controlnet `model_id` to:
+```yaml
+model_id: "lllyasviel/control_v11f1e_sd15_tile"
+```
+This downloads on first run and caches in HuggingFace's local cache.
+
+---
+
+### 4. TensorRT engines
+
+Engines are compiled automatically on first run when `acceleration: tensorrt` is set.
+This takes **15–30 minutes** but only happens once per resolution/model combination.
+Compiled engines are stored in `engines/` and reused on all subsequent starts.
+
+If you want to skip TensorRT for now, use `acceleration: none` in your config — slower but works immediately.
+
+---
+
+## Updating an Existing Install
 
 ```bash
 cd C:\_proj\iVizDiff
-git pull mine main
-cd demo/realtime-img2img/frontend
-npm run build
+git pull origin main
+cd frontend && npm run build && cd ..
 ```
 
-You only need `npm run build` if frontend files changed (`.svelte`, `.ts` files in `frontend/src/`). Python-only changes don't need a rebuild.
-
-### Checking what changed
-
+Python dependencies rarely change. If you see import errors after an update:
 ```bash
-git log --oneline -10        # last 10 commits
-git diff HEAD~1              # what changed in the last commit
+pip install -r requirements-5090.txt   # or requirements-3090.txt
+pip install -e .
 ```
-
----
-
-## Hardware Summary
-
-| Machine | GPU | VRAM | Expected FPS | Acceleration |
-|---|---|---|---|---|
-| Home / Lab | RTX 5090 | 32GB | 30+ fps | tensorrt |
-| Grad | RTX 3090 | 24GB | 15–25 fps | tensorrt or none |
-| Grad | GTX 1080 | 8GB | 2–5 fps | none only |
-
-> **GTX 1080 note:** 8GB VRAM is very tight. You may need to disable IPAdapter or ControlNet in the config to fit in memory. Use `acceleration: none`. Performance will be limited — treat it as a preview/development machine only.
 
 ---
 
 ## Troubleshooting
 
-**`torch.cuda.is_available()` returns False**
-→ CUDA driver mismatch. Check `nvidia-smi` shows a GPU and reinstall the correct PyTorch build.
+**`torch.cuda.is_available()` returns `False`**
+→ CUDA driver mismatch. Check `nvidia-smi` shows your GPU. Reinstall the correct PyTorch build for your CUDA version.
 
-**TensorRT engines take forever on first run**
+**`ModuleNotFoundError: No module named 'streamdiffusion'`**
+→ Run `pip install -e .` from the repo root.
+
+**TensorRT engine build takes a long time on first start**
 → Normal. Engines compile once and cache in `engines/`. Subsequent starts are fast.
 
 **Frontend shows blank page**
-→ Run `npm run build` in `demo/realtime-img2img/frontend/` and restart.
+→ Run `npm run build` in `frontend/` and restart.
 
-**`ModuleNotFoundError` on startup**
-→ Make sure conda env is activated: `conda activate sdiff`
+**RTX 5090: `xformers` error or PyTorch version changed**
+→ Reinstall PyTorch cu128:
+```bash
+pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 torchaudio==2.7.0+cu128 --extra-index-url https://download.pytorch.org/whl/cu128
+```
+
+**Out of memory on startup**
+→ Disable IPAdapter or ControlNet in `configs/NewStart.yaml` by setting `enabled: false`. Use `acceleration: none` on GPUs with less than 16GB VRAM.

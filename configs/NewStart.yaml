@@ -1,6 +1,23 @@
-model_id: "C:\\AI\\models\\Stable-diffusion\\PerfectPhotonV2.1"
-# model_id: "C:\\AI\\models\\Stable-diffusion\\lyriel_v15.safetensors"
-t_index_list: [32,45]
+# iVizDiff — Default Configuration
+# ─────────────────────────────────────────────────────────────────────────────
+# All paths are relative to the iVizDiff repo root.
+# See docs/INSTALL.md for model download instructions.
+# ─────────────────────────────────────────────────────────────────────────────
+
+# Base diffusion model — must be SD1.5, diffusers format.
+# NOT compatible with SDXL or SD3.
+#
+# Option A — Free, downloads automatically from HuggingFace:
+#   model_id: "runwayml/stable-diffusion-v1-5"
+#
+# Option B — Local model (faster startup, no internet needed):
+#   Download a SD1.5 diffusers-format model, place in models/sd/
+#   e.g. PerfectPhotonV2 from CivitAI (convert to diffusers format first)
+#   model_id: "models/sd/PerfectPhotonV2.1"
+#
+model_id: "models/sd/PerfectPhotonV2.1"
+
+t_index_list: [32, 45]
 output_type: "pt"
 
 width: 512
@@ -12,11 +29,17 @@ frame_buffer_size: 1
 use_lcm_lora: true
 use_tiny_vae: true
 
-#acceleration: "xformers"   # BROKEN on Blackwell - do not use
-#acceleration: "none"         # Safe start on 5090 - native SDPA
-acceleration: "tensorrt"    # Enable later once stable
+# Acceleration — choose based on your setup:
+#   tensorrt  — fastest, requires building engines first (see docs/INSTALL.md)
+#   none      — safe fallback, works on all GPUs, slower
+#
+# RTX 5090 / Blackwell: do NOT use xformers — it will crash.
+# RTX 3090 / 4090: xformers is optional, tensorrt is faster.
+#
+acceleration: "tensorrt"
+#acceleration: "none"
 
-engine_dir: "C:\\_proj\\SDiff\\engines"
+engine_dir: "engines"
 
 seed: 789
 
@@ -42,14 +65,27 @@ use_controlnet: true
 use_ipadapter: true
 use_streamv2v: false
 
+# IPAdapter — requires ip-adapter_sd15.bin and image_encoder in models/ipadapter/
+# Download from: https://huggingface.co/h94/IP-Adapter
+# Place files at:
+#   models/ipadapter/models/ip-adapter_sd15.bin
+#   models/ipadapter/models/image_encoder/   (the full folder)
+#
 ipadapters:
-  - ipadapter_model_path: "C:\\AI\\models\\ipadapter\\models\\ip-adapter_sd15.bin"
-    image_encoder_path: "C:\\AI\\models\\ipadapter\\models\\image_encoder"
+  - ipadapter_model_path: "models/ipadapter/models/ip-adapter_sd15.bin"
+    image_encoder_path: "models/ipadapter/models/image_encoder"
     scale: 0.70
     enabled: true
 
+# ControlNet — sd15_tile runs locally from models/controlnet/sd15_tile/
+# Download from: https://huggingface.co/lllyasviel/control_v11f1e_sd15_tile
+# Place the full diffusers-format folder at: models/controlnet/sd15_tile/
+#
+# Alternative: use the HuggingFace ID directly (downloads automatically):
+#   model_id: "lllyasviel/control_v11f1e_sd15_tile"
+#
 controlnets:
-  - model_id: "C:\\_proj\\SDiff\\models\\controlnet\\sd15_tile"
+  - model_id: "models/controlnet/sd15_tile"
     conditioning_scale: 0.2
     preprocessor: "feedback"
     preprocessor_params:

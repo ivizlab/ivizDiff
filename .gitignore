@@ -14,13 +14,16 @@ venv/
 env/
 
 # ── Models & large weights (download separately — see docs/INSTALL.md) ────────
-models/
-engines/
+# Folder structure is committed via .gitkeep; model files are not.
 *.safetensors
 *.ckpt
 *.pt
 *.bin
 *.onnx
+models/**
+!models/**/.gitkeep
+engines/**
+!engines/.gitkeep
 
 # ── User output — folders exist in repo via .gitkeep, content is not committed ─
 snapshots/*
