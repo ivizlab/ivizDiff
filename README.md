@@ -2,7 +2,7 @@
 
 Real-time AI video transformation for live performance and creative research.
 
-A webcam or video file is fed into a Stable Diffusion pipeline and the transformed output streams back to a browser at 15–30 fps. Style images, ControlNet, IPAdapter, and live input controls (microphone, breath, gamepad) let you shape the output in real time.
+A webcam or video file is fed into a Stable Diffusion pipeline and the transformed output streams back to a browser at 15–30 fps. Style images, ControlNet, IPAdapter, and live input controls (microphone, breath, gamepad) let you shape the output in real time. From ivizlab.org at SFU and forked from @ryanontheinside and @livepeer
 
 ---
 
@@ -89,6 +89,10 @@ iVizDiff/
 
 ---
 
+
 ## License
 
 Apache 2.0
+
+
+- ivizlab.org - 
