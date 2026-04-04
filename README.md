@@ -11,9 +11,9 @@ A webcam or video file is fed into a Stable Diffusion pipeline and the transform
 | GPU | CUDA | Notes |
 |---|---|---|
 | RTX 5090 / 5080 (Blackwell) | 12.8 | Follow the **5090 install path** in `docs/INSTALL.md` |
-| RTX 4090 / 3090 / 3080 (Ampere / Ada) | 12.1–12.4 | Follow the **3090 install path** in `docs/INSTALL.md` |
+| Any other NVIDIA GPU (3080, 3090, 4080, 4090, laptop GPUs) | 12.1–12.4 | Follow the **standard install path** in `docs/INSTALL.md` |
 
-Other GPUs with 8GB+ VRAM may work on the 3090 path but are untested.
+Other GPUs with 8GB+ VRAM may work on the standard path but are untested.
 
 ---
 
@@ -30,7 +30,7 @@ conda activate sdiff
 
 # 3. Install PyTorch and dependencies — choose your GPU
 #    RTX 5090:  see docs/INSTALL.md Section A
-#    RTX 3090:  see docs/INSTALL.md Section B
+#    All other GPUs:  see docs/INSTALL.md Section B
 
 # 4. Install the iVizDiff library
 pip install -e .

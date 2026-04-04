@@ -20,22 +20,12 @@ taesd_model = "madebyollin/taesd"
 default_prompt = "Portrait of The Joker halloween costume, face painting, with , glare pose, detailed, intricate, full of colour, cinematic lighting, trending on artstation, 8k, hyperrealistic, focused, extreme details, unreal engine 5 cinematic, masterpiece"
 default_negative_prompt = "black and white, blurry, low resolution, pixelated,  pixel art, low quality, low fidelity"
 
-page_content = """<h1 class="text-3xl font-bold">StreamDiffusion</h1>
-<p class="text-sm">
-    This demo showcases
-    <a
-    href="https://github.com/cumulo-autumn/StreamDiffusion"
-    target="_blank"
-    class="text-blue-500 underline hover:no-underline">StreamDiffusion
-</a>
-pipeline using configuration system.
-</p>
-"""
+page_content = '<h1 class="text-3xl font-bold tracking-tight">iVizDiff</h1><p class="text-sm mt-0.5">Live GenAI for Art &amp; Research &nbsp;&mdash;&nbsp; <a href="https://ivizlab.sfu.ca" target="_blank" class="text-blue-500 underline hover:no-underline">iVizLab</a> &nbsp;|&nbsp; <a href="https://github.com/cumulo-autumn/StreamDiffusion" target="_blank" class="text-blue-500 underline hover:no-underline">StreamDiffusion</a></p>'
 
 
 class Pipeline:
     class Info(BaseModel):
-        name: str = "StreamDiffusion"
+        name: str = "iVizDiff"
         input_mode: str = "image"
         page_content: str = page_content
 

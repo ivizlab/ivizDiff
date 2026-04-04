@@ -1,4 +1,6 @@
-# iVizDiff — RTX 3090 / 4090 / Ampere-Ada requirements (CUDA 12.1–12.4)
+# iVizDiff — Standard GPU requirements
+# For: RTX 3080, 3090, 4080, 4090, 4090 laptop, and any other non-Blackwell NVIDIA GPU
+# NOT for RTX 5090/5080 (Blackwell) — use requirements-5090.txt instead
 #
 # IMPORTANT — install PyTorch FIRST before running pip install -r this file.
 #
@@ -9,7 +11,7 @@
 #   python -c "import torch; print(torch.__version__)"
 #
 # Step 3: Install these requirements
-#   pip install -r requirements-3090.txt
+#   pip install -r requirements-standard.txt
 
 diffusers==0.35.0
 transformers==4.56.0

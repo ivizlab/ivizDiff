@@ -7,7 +7,7 @@
 | Situation | Go to |
 |---|---|
 | RTX 5090 / Blackwell GPU | [Section A — RTX 5090 Fresh Install](#section-a--rtx-5090-fresh-install) |
-| RTX 3090 / 4090 / Ampere-Ada GPU | [Section B — RTX 3090 / 4090 Install](#section-b--rtx-3090--4090-install) |
+| Any standard NVIDIA GPU (RTX 3080, 3090, 4080, 4090, laptops) | [Section B — Standard GPU Install (RTX 3080/3090/4080/4090 and laptops)](#section-b--standard-gpu-install-rtx-308030904080408090-and-laptops) |
 | Already installed, pulling updates | [Updating an Existing Install](#updating-an-existing-install) |
 
 ---
@@ -94,7 +94,7 @@ Open `http://localhost:7860` in your browser.
 
 ---
 
-## Section B — RTX 3090 / 4090 Install
+## Section B — Standard GPU Install (RTX 3080/3090/4080/4090 and laptops)
 
 ### B1. Clone the repo
 
@@ -124,7 +124,7 @@ python -c "import torch; print(torch.__version__); print(torch.cuda.is_available
 ### B4. Install project dependencies
 
 ```bash
-pip install -r requirements-3090.txt
+pip install -r requirements-standard.txt
 pip install -e .
 ```
 
@@ -248,7 +248,7 @@ cd frontend && npm run build && cd ..
 
 Python dependencies rarely change. If you see import errors after an update:
 ```bash
-pip install -r requirements-5090.txt   # or requirements-3090.txt
+pip install -r requirements-5090.txt   # or requirements-standard.txt
 pip install -e .
 ```
 

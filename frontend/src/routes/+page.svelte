@@ -985,7 +985,7 @@
     <div class="flex-1 flex items-center justify-center">
       <div class="flex items-center gap-3 text-2xl">
         <Spinner classList={'animate-spin opacity-50'} />
-        <p>Loading StreamDiffusion...</p>
+        <p>Loading iVizDiff...</p>
       </div>
     </div>
   {/if}
