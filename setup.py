@@ -6,7 +6,6 @@ install_requires = [
     "accelerate>=1.10.0",
     "omegaconf",
     "fire",
-    "diffusers-ipadapter @ git+https://github.com/livepeer/Diffusers_IPAdapter.git@aabdc79e8298e7f66700e6fd15923aa9efc21cb1",
 ]
 
 setup(

@@ -134,9 +134,9 @@ class App:
         # VirtCam subprocess
         self.virtcam_process = None
         self.virtcam_video_path = None
-        _project_root = Path(__file__).parent.parent.parent
-        self._virtcam_script = _project_root / "utils" / "virtcam.py"
-        self._source_video_dir = _project_root / "videos" / "input"
+        _repo_root = Path(__file__).parent
+        self._virtcam_script = _repo_root / "utils" / "virtcam.py"
+        self._source_video_dir = _repo_root / "videos" / "input"
         # Store latest output frame for snapshots
         self.last_output_image: Image.Image | None = None
         # Output upscaling (1 = off, 2 = 2x Lanczos)
@@ -273,6 +273,8 @@ class App:
                     if 384 <= config_width <= 1024 and 384 <= config_height <= 1024:
                         self.new_width = config_width
                         self.new_height = config_height
+            if 'video_input_dir' in config_data:
+                self._source_video_dir = Path(config_data['video_input_dir'])
             logger.info(f"_load_yaml_config: Loaded config from {path}")
         except Exception as e:
             logger.error(f"_load_yaml_config: Failed to load config {path}: {e}")
@@ -946,6 +948,11 @@ class App:
                         logging.error(f"upload_controlnet_config: Failed to update resolution: {e}")
                         # Don't fail the upload, just log the error
                 
+                # Update video input directory if specified in config
+                if 'video_input_dir' in config_data:
+                    self._source_video_dir = Path(config_data['video_input_dir'])
+                    logger.info(f"upload_controlnet_config: video_input_dir set to {self._source_video_dir}")
+
                 # Normalize prompt and seed configurations for frontend
                 normalized_prompt_blending = self._normalize_prompt_config(config_data)
                 normalized_seed_blending = self._normalize_seed_config(config_data)

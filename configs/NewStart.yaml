@@ -41,6 +41,11 @@ acceleration: "tensorrt"
 
 engine_dir: "engines"
 
+# Directory scanned for input video files (shown in the video input picker).
+# Relative paths are resolved from wherever you launch iVizDiff.
+# Override here if your videos live elsewhere, e.g. "C:/videos/input"
+video_input_dir: "videos/input"
+
 seed: 789
 
 mode: "img2img"
