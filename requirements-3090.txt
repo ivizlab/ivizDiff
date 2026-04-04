@@ -1,0 +1,31 @@
+# iVizDiff — RTX 3090 / 4090 / Ampere-Ada requirements (CUDA 12.1–12.4)
+#
+# IMPORTANT — install PyTorch FIRST before running pip install -r this file.
+#
+# Step 1: Install PyTorch (adjust cu121/cu124 to match your CUDA version)
+#   pip install torch torchvision torchaudio --index-url https://download.pytorch.org/whl/cu121
+#
+# Step 2: Verify
+#   python -c "import torch; print(torch.__version__)"
+#
+# Step 3: Install these requirements
+#   pip install -r requirements-3090.txt
+
+diffusers==0.35.0
+transformers==4.56.0
+peft==0.18.0
+accelerate==1.10.0
+huggingface_hub==0.35.0
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+Pillow==10.5.0
+compel==2.0.2
+controlnet-aux==0.0.7
+xformers
+markdown2
+PyYAML
+python-multipart
+opencv-python
+pygame
+omegaconf
+fire

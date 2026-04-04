@@ -1,0 +1,58 @@
+model_id: "C:\\AI\\models\\Stable-diffusion\\PerfectPhotonV2.1"
+# model_id: "C:\\AI\\models\\Stable-diffusion\\lyriel_v15.safetensors"
+t_index_list: [32,45]
+output_type: "pt"
+
+width: 512
+height: 512
+device: "cuda"
+dtype: "float16"
+delta: 0.7
+frame_buffer_size: 1
+use_lcm_lora: true
+use_tiny_vae: true
+
+#acceleration: "xformers"   # BROKEN on Blackwell - do not use
+#acceleration: "none"         # Safe start on 5090 - native SDPA
+acceleration: "tensorrt"    # Enable later once stable
+
+engine_dir: "C:\\_proj\\SDiff\\engines"
+
+seed: 789
+
+mode: "img2img"
+use_denoising_batch: true
+cfg_type: "self"
+
+negative_prompt: "blurry, low quality, nudity, nsfw"
+guidance_scale: 1.1
+num_inference_steps: 50
+
+prompt_blending:
+  prompt_list:
+    - ["abstract sculpture, masterpiece, highest detail, 4k", 1.0]
+    - ["fire, sun rays, sparks, masterpiece, highest detail, 4k", 0.0]
+
+seed_blending:
+  seed_list:
+    - [789, 1.0]
+    - [1234, 0.0]
+
+use_controlnet: true
+use_ipadapter: true
+use_streamv2v: false
+
+ipadapters:
+  - ipadapter_model_path: "C:\\AI\\models\\ipadapter\\models\\ip-adapter_sd15.bin"
+    image_encoder_path: "C:\\AI\\models\\ipadapter\\models\\image_encoder"
+    scale: 0.70
+    enabled: true
+
+controlnets:
+  - model_id: "C:\\_proj\\SDiff\\models\\controlnet\\sd15_tile"
+    conditioning_scale: 0.2
+    preprocessor: "feedback"
+    preprocessor_params:
+      feedback_strength: 0.20
+      image_resolution: 512
+    enabled: true

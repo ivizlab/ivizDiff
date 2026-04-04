@@ -1,0 +1,34 @@
+# iVizDiff — RTX 5090 / Blackwell (sm_120) requirements
+#
+# IMPORTANT — install PyTorch FIRST before running pip install -r this file.
+# xformers is intentionally NOT listed here — it is broken on Blackwell and
+# will corrupt your PyTorch installation if installed.
+#
+# Step 1: Install PyTorch cu128
+#   pip install torch==2.7.0+cu128 torchvision==0.22.0+cu128 torchaudio==2.7.0+cu128 \
+#       --extra-index-url https://download.pytorch.org/whl/cu128
+#
+# Step 2: Verify
+#   python -c "import torch; print(torch.__version__)"
+#   Must print: 2.7.0+cu128
+#
+# Step 3: Install these requirements
+#   pip install -r requirements-5090.txt
+
+diffusers==0.35.0
+transformers==4.56.0
+peft==0.18.0
+accelerate==1.10.0
+huggingface_hub==0.35.0
+fastapi==0.115.0
+uvicorn[standard]==0.32.0
+Pillow==10.5.0
+compel==2.0.2
+controlnet-aux==0.0.7
+markdown2
+PyYAML
+python-multipart
+opencv-python
+pygame
+omegaconf
+fire
