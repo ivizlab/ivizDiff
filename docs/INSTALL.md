@@ -202,6 +202,21 @@ This downloads ~4GB from HuggingFace on first run.
 
 Any other SD1.5 diffusers-format model placed in `models/sd/` will work — just update `model_id` in your config.
 
+**Option C — Skip conversion, point directly at the `.safetensors` file:**
+
+This is tested and works — you don't strictly need to convert:
+```yaml
+model_id: "C:/AI/models/Stable-diffusion/PerfectPhotonV2.1.safetensors"
+```
+Loading time is about the same as the converted folder. The one real difference: on
+its *first* load, diffusers fetches small reference config files (tokenizer/scheduler
+defaults) from Hugging Face Hub to know how to structure the pipeline around your
+weights — so you need internet access (or an already-warm HF cache) the first time
+you point at a raw checkpoint this way. The pre-converted folder (Option B) has no
+such dependency and works fully offline from the start. After the first successful
+load, the fetched configs are cached locally and subsequent loads don't need the
+network either.
+
 ---
 
 ### 2. IPAdapter
