@@ -9,6 +9,8 @@
   import PipelineOptions from '$lib/components/PipelineOptions.svelte';
   import ControlNetConfig from '$lib/components/ControlNetConfig.svelte';
   import IPAdapterConfig from '$lib/components/IPAdapterConfig.svelte';
+  import FeatureBankConfig from '$lib/components/FeatureBankConfig.svelte';
+  import LoraConfig from '$lib/components/LoraConfig.svelte';
   import BlendingControl from '$lib/components/BlendingControl.svelte';
   import ResolutionPicker from '$lib/components/ResolutionPicker.svelte';
   import Spinner from '$lib/icons/spinner.svelte';
@@ -40,6 +42,10 @@
   let seedBlendingConfig: any = null;
   let normalizePromptWeights: boolean = true;
   let normalizeSeedWeights: boolean = true;
+  let featureBankEnabled: boolean = true;
+  let featureBankWeight: number = 0.15;
+  let loraList: any[] = [];
+  let loraDir: string = '';
   let blendingResetKey: number = 0;
   let controlnetResetKey: number = 0;
   let pageContent: string;
@@ -128,6 +134,10 @@
       seedBlendingConfig = settings.seed_blending || null;
       normalizePromptWeights = settings.normalize_prompt_weights ?? true;
       normalizeSeedWeights = settings.normalize_seed_weights ?? true;
+      featureBankEnabled = settings.feature_bank_enabled ?? true;
+      featureBankWeight = settings.feature_bank_weight ?? 0.15;
+      loraList = settings.loras ?? [];
+      loraDir = settings.lora_dir ?? '';
       isImageMode = pipelineInfo.input_mode.default === PipelineMode.IMAGE;
       maxQueueSize = settings.max_queue_size;
       pageContent = settings.page_content;
@@ -287,6 +297,9 @@
   }
 
   $: isLCMRunning = $lcmLiveStatus !== LCMLiveStatus.DISCONNECTED;
+  $: if ($lcmLiveStatus === LCMLiveStatus.DISCONNECTED) {
+    disabled = false;
+  }
   $: if ($lcmLiveStatus === LCMLiveStatus.TIMEOUT) {
     warningMessage = 'Session timed out. Please try again.';
   }
@@ -375,6 +388,8 @@
       ipadapter_scale: ipadapterScale,
       ipadapter_blend_weight: ipadapterBlendWeight,
       ipadapter_weight_type: ipadapterWeightType,
+      feature_bank_enabled: featureBankEnabled,
+      feature_bank_weight: featureBankWeight,
       style_image_a_data: styleImageData.style_image_a || null,
       style_image_b_data: styleImageData.style_image_b || null,
       controlnets: (controlnetInfo?.controlnets || []).map((cn: any, i: number) => ({
@@ -430,6 +445,17 @@
         calls.push(fetch('/api/ipadapter/update-weight-type', {
           method: 'POST', headers: { 'Content-Type': 'application/json' },
           body: JSON.stringify({ weight_type: p.ipadapter_weight_type })
+        }));
+      }
+
+      // Feature bank
+      if (p.feature_bank_enabled != null || p.feature_bank_weight != null) {
+        const fb: any = {};
+        if (p.feature_bank_enabled != null) fb.enabled = p.feature_bank_enabled;
+        if (p.feature_bank_weight  != null) fb.weight  = p.feature_bank_weight;
+        calls.push(fetch('/api/feature-bank', {
+          method: 'POST', headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(fb)
         }));
       }
 
@@ -495,6 +521,8 @@
       if (p.ipadapter_scale        != null) ipadapterScale        = p.ipadapter_scale;
       if (p.ipadapter_blend_weight != null) ipadapterBlendWeight  = p.ipadapter_blend_weight;
       if (p.ipadapter_weight_type  != null) ipadapterWeightType   = p.ipadapter_weight_type;
+      if (p.feature_bank_enabled   != null) featureBankEnabled    = p.feature_bank_enabled;
+      if (p.feature_bank_weight    != null) featureBankWeight     = p.feature_bank_weight;
       if (p.negative_prompt          != null) negativePrompt          = p.negative_prompt;
       if (p.normalize_prompt_weights != null) normalizePromptWeights  = p.normalize_prompt_weights;
       if (p.normalize_seed_weights   != null) normalizeSeedWeights    = p.normalize_seed_weights;
@@ -600,7 +628,9 @@
       const result = await response.json();
 
       if (response.ok) {
-        uploadStatus = 'Configuration uploaded successfully! Pipeline will load when you start streaming.';
+        uploadStatus = isLCMRunning
+          ? 'Configuration loaded! Pipeline rebuilding — stream will resume in ~30–60s.'
+          : 'Configuration loaded! Pipeline will rebuild when you start streaming.';
         fileInput.value = '';
         
         // Update ControlNet info
@@ -897,7 +927,7 @@
             </div>
           </div>
           <div class="flex-1 flex items-center justify-center">
-            <div class="w-full max-w-2xl">
+            <div class="w-full">
               <ImagePlayer {currentResolution} on:paramsLoaded={handleRestoreParams} collectParams={getSnapshotParams} />
             </div>
           </div>
@@ -938,6 +968,17 @@
             on:tIndexListUpdated={(e) => handleTIndexListUpdate(e.detail)}
             on:controlnetConfigChanged={getSettings}
           ></ControlNetConfig>
+
+          <FeatureBankConfig
+            bind:enabled={featureBankEnabled}
+            bind:weight={featureBankWeight}
+          ></FeatureBankConfig>
+
+          <LoraConfig
+            initialLoras={loraList}
+            {loraDir}
+            getStreamData={getSreamdata}
+          ></LoraConfig>
 
           <!-- Output Upscale -->
           <div class="bg-white dark:bg-gray-800 rounded-lg border border-gray-200 dark:border-gray-700 p-3">

@@ -97,7 +97,7 @@ def _extract_wrapper_params(config: Dict[str, Any]) -> Dict[str, Any]:
     param_map = {
         'model_id_or_path': config.get('model_id', 'stabilityai/sd-turbo'),
         't_index_list': config.get('t_index_list', [0, 16, 32, 45]),
-        'lora_dict': config.get('lora_dict'),
+        'lora_dict': _prepare_loras(config),
         'mode': config.get('mode', 'img2img'),
         'output_type': config.get('output_type', 'pil'),
         'lcm_lora_id': config.get('lcm_lora_id'),
@@ -172,6 +172,40 @@ def _extract_prepare_params(config: Dict[str, Any]) -> Dict[str, Any]:
         }
     
     return prepare_params
+
+def _prepare_loras(config: Dict[str, Any]) -> Optional[Dict[str, float]]:
+    """Build lora_dict from config.
+
+    Supports two formats:
+      1. List (preferred, like ipadapters/controlnets):
+           loras:
+             - path: "models/loras/my_lora.safetensors"
+               scale: 0.8
+               enabled: true
+      2. Legacy dict (passed through unchanged):
+           lora_dict:
+             "models/loras/my_lora.safetensors": 0.8
+    If both are present, 'loras' takes precedence.
+    """
+    if 'loras' in config and config['loras']:
+        result: Dict[str, float] = {}
+        for entry in config['loras']:
+            if not isinstance(entry, dict):
+                continue
+            if not entry.get('enabled', True):
+                continue
+            path = entry.get('path')
+            scale = float(entry.get('scale', 1.0))
+            if path:
+                result[path] = scale
+        return result if result else None
+
+    # Fall back to legacy dict format
+    raw = config.get('lora_dict')
+    if raw and isinstance(raw, dict):
+        return {str(k): float(v) for k, v in raw.items()}
+    return None
+
 
 def _prepare_controlnet_configs(config: Dict[str, Any]) -> List[Dict[str, Any]]:
     """Prepare ControlNet configurations for wrapper"""

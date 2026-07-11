@@ -39,6 +39,12 @@ class StreamParameterUpdater(OrchestratorUser):
         self._seed_cache: Dict[int, Dict] = {}
         self._current_seed_list: List[Tuple[int, float]] = []
         self._seed_cache_stats = CacheStats()
+
+        # Desired t_index_list — tracks what the user actually wants, independent
+        # of any clamping applied when num_inference_steps is low.  Used so that
+        # raising steps back up restores the original indices rather than staying
+        # stuck at the clamped values.
+        self._desired_t_index_list: Optional[List[int]] = None
         
         
         # Attach shared orchestrator once (lazy-creates on stream if absent)
@@ -266,7 +272,13 @@ class StreamParameterUpdater(OrchestratorUser):
 
             if num_inference_steps is not None and t_index_list is None:
                 max_step = num_inference_steps - 1
-                t_index_list = [min(t, max_step) for t in self.stream.t_list]
+                # Seed _desired_t_index_list from pipeline on first use.
+                if self._desired_t_index_list is None:
+                    self._desired_t_index_list = list(self.stream.t_list)
+                # Use the desired (un-clamped) list so that raising steps back up
+                # restores the original indices rather than staying at previously
+                # clamped values.
+                t_index_list = [min(t, max_step) for t in self._desired_t_index_list]
 
             if guidance_scale is not None:
                 if self.stream.cfg_type == "none" and guidance_scale > 1.0:
@@ -289,6 +301,9 @@ class StreamParameterUpdater(OrchestratorUser):
 
             # Handle prompt blending if prompt_list is provided, or if only negative_prompt changed
             if prompt_list is not None:
+                # Reset feature bank so the new style doesn't get contaminated by old frames
+                if hasattr(self.stream, 'reset_feature_bank'):
+                    self.stream.reset_feature_bank()
                 self._update_blended_prompts(
                     prompt_list=prompt_list,
                     negative_prompt=negative_prompt or self._current_negative_prompt,
@@ -311,6 +326,10 @@ class StreamParameterUpdater(OrchestratorUser):
                 )
 
             if t_index_list is not None:
+                # If this came from an explicit user request (not auto-clamp), save it
+                # as the desired list so future num_inference_steps changes can restore it.
+                if t_index_list is not None and num_inference_steps is None:
+                    self._desired_t_index_list = list(t_index_list)
                 self._recalculate_timestep_dependent_params(t_index_list)
 
             # Handle ControlNet configuration updates

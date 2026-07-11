@@ -18,35 +18,50 @@ let websocket: WebSocket | null = null;
 export const lcmLiveActions = {
     async start(getSreamdata: () => any[]) {
         return new Promise((resolve, reject) => {
+            let settled = false;
+            const settle = (fn: () => void) => { if (!settled) { settled = true; fn(); } };
 
             try {
                 const userId = crypto.randomUUID();
                 const websocketURL = `${window.location.protocol === "https:" ? "wss" : "ws"
                     }:${window.location.host}/api/ws/${userId}`;
 
-                websocket = new WebSocket(websocketURL);
-                websocket.onopen = () => {
+                // Keep a local reference so stale onclose handlers can detect
+                // they belong to a superseded connection and avoid clobbering
+                // the status set by the newer one.
+                const ws = new WebSocket(websocketURL);
+                websocket = ws;
+
+                ws.onopen = () => {
                     console.log("Connected to websocket");
                 };
-                websocket.onclose = () => {
-                    lcmLiveStatus.set(LCMLiveStatus.DISCONNECTED);
+                ws.onclose = () => {
+                    // Only update global state when this is still the active socket.
+                    // If stop() or a newer start() has already replaced websocket,
+                    // leave the new connection's state alone.
+                    if (websocket === ws) {
+                        lcmLiveStatus.set(LCMLiveStatus.DISCONNECTED);
+                        streamId.set(null);
+                        websocket = null;
+                    }
                     console.log("Disconnected from websocket");
+                    settle(() => resolve({ status: "disconnected" }));
                 };
-                websocket.onerror = (err) => {
+                ws.onerror = (err) => {
                     console.error(err);
                 };
-                websocket.onmessage = (event) => {
+                ws.onmessage = (event) => {
                     const data = JSON.parse(event.data);
                     switch (data.status) {
                         case "connected":
                             lcmLiveStatus.set(LCMLiveStatus.CONNECTED);
                             streamId.set(userId);
-                            resolve({ status: "connected", userId });
+                            settle(() => resolve({ status: "connected", userId }));
                             break;
                         case "send_frame":
                             lcmLiveStatus.set(LCMLiveStatus.SEND_FRAME);
                             const streamData = getSreamdata();
-                            websocket?.send(JSON.stringify({ status: "next_frame" }));
+                            ws.send(JSON.stringify({ status: "next_frame" }));
                             for (const d of streamData) {
                                 this.send(d);
                             }
@@ -58,13 +73,13 @@ export const lcmLiveActions = {
                             console.log("timeout");
                             lcmLiveStatus.set(LCMLiveStatus.TIMEOUT);
                             streamId.set(null);
-                            reject(new Error("timeout"));
+                            settle(() => reject(new Error("timeout")));
                             break;
                         case "error":
                             console.log(data.message);
                             lcmLiveStatus.set(LCMLiveStatus.DISCONNECTED);
                             streamId.set(null);
-                            reject(new Error(data.message));
+                            settle(() => reject(new Error(data.message)));
                             break;
                     }
                 };
@@ -73,7 +88,7 @@ export const lcmLiveActions = {
                 console.error(err);
                 lcmLiveStatus.set(LCMLiveStatus.DISCONNECTED);
                 streamId.set(null);
-                reject(err);
+                settle(() => reject(err as Error));
             }
         });
     },
@@ -90,10 +105,11 @@ export const lcmLiveActions = {
     },
     async stop() {
         lcmLiveStatus.set(LCMLiveStatus.DISCONNECTED);
-        if (websocket) {
-            websocket.close();
-        }
-        websocket = null;
         streamId.set(null);
+        const ws = websocket;
+        websocket = null;   // clear first so onclose sees websocket !== ws
+        if (ws) {
+            ws.close();
+        }
     },
 };

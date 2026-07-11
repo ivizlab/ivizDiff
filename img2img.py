@@ -111,9 +111,12 @@ class Pipeline:
             overrides = {
                 'device': device,
                 'dtype': torch_dtype,
-                'acceleration': args.acceleration,
                 'use_safety_checker': args.safety_checker,
             }
+            # Let the YAML config's acceleration setting win; only fall back to the
+            # command-line arg when the config doesn't specify one.
+            if 'acceleration' not in self.config:
+                overrides['acceleration'] = args.acceleration
 
             # Determine engine_dir: use config value if available, otherwise use args
             engine_dir = args.engine_dir  # Default to command-line/environment value

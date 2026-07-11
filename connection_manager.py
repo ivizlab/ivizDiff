@@ -63,11 +63,18 @@ class ConnectionManager:
         user_session = self.active_connections.pop(user_id, None)
         if user_session:
             queue = user_session["queue"]
+            # Drain stale frames first
             while not queue.empty():
                 try:
                     queue.get_nowait()
                 except asyncio.QueueEmpty:
-                    continue
+                    break
+            # Put a sentinel so any coroutine blocked on await queue.get()
+            # wakes up immediately instead of hanging forever.
+            try:
+                queue.put_nowait(None)
+            except Exception:
+                pass
 
     def get_user_count(self) -> int:
         return len(self.active_connections)

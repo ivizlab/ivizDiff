@@ -19,6 +19,22 @@ defaults:
   normalize_prompt_weights: true
   normalize_seed_weights: true
 
+  # Constant Frame Rate (CFR) pacing
+  # cfr_enabled: locks output to target_fps; false = run as fast as possible
+  cfr_enabled: false
+  target_fps: 24
+
+  # Color histogram match post-processing
+  # color_match_enabled requires capturing a reference frame first via /api/color-match/capture-reference
+  color_match_enabled: false
+  color_match_strength: 0.4
+
+  # Latent feature bank — blends last N denoised latents to reduce structural flicker
+  # Works with TensorRT. weight: 0.1–0.3 is subtle, 0.4+ is noticeable smoothing
+  feature_bank_enabled: false
+  feature_bank_size: 3
+  feature_bank_weight: 0.2
+
 # Available ControlNet models organized by base model type
 available_controlnets:
   sd15:

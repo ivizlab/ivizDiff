@@ -12,6 +12,118 @@ from PIL import Image
 import logging
 logger = logging.getLogger(__name__)
 
+
+def _lora_has_text_encoder_keys(lora_path: str) -> bool:
+    """Return True if the LoRA file contains text-encoder weights.
+
+    UNet-only LoRAs are common; asking diffusers to fuse 'text_encoder'
+    when no such keys exist raises 'Invalid LoRA checkpoint' in >= 0.30.
+    """
+    try:
+        from safetensors import safe_open
+        with safe_open(lora_path, framework="pt", device="cpu") as f:
+            return any(
+                "text_encoder" in k or k.startswith("lora_te")
+                for k in f.keys()
+            )
+    except Exception:
+        # .pt file or unreadable — assume both components present to be safe
+        return True
+
+
+def _fuse_te_lora_manual(text_encoder: Any, lora_path: str, lora_scale: float) -> int:
+    """Fuse A1111-format lora_te_ keys directly into the text encoder weights.
+
+    diffusers 0.35 silently drops lora_te_ keys from A1111 LoRAs
+    (warns 'No LoRA keys associated to CLIPTextModel found').
+    This reads the file, converts key names, and adds the LoRA delta
+    directly to the text encoder parameters, exactly as fuse_lora would.
+
+    Returns the number of layers modified.
+    """
+    import re
+    try:
+        from safetensors import safe_open
+    except ImportError:
+        logger.warning("_fuse_te_lora_manual: safetensors not available, skipping TE LoRA")
+        return 0
+
+    try:
+        te_state: Dict[str, Any] = {}
+        with safe_open(lora_path, framework="pt", device="cpu") as f:
+            for key in f.keys():
+                if key.startswith("lora_te_"):
+                    te_state[key] = f.get_tensor(key)
+
+        if not te_state:
+            return 0
+
+        # Group keys by base layer name
+        groups: Dict[str, Dict[str, Any]] = {}
+        for k, v in te_state.items():
+            name = k.replace("lora_te_", "")
+            if ".lora_down." in name:
+                base = name[: name.index(".lora_down.")]
+                groups.setdefault(base, {})["lora_down"] = v
+            elif ".lora_up." in name:
+                base = name[: name.index(".lora_up.")]
+                groups.setdefault(base, {})["lora_up"] = v
+            elif name.endswith(".alpha"):
+                base = name[: -len(".alpha")]
+                groups.setdefault(base, {})["alpha"] = v
+
+        # Map A1111 suffixes to CLIPTextModel parameter names
+        _SUFFIX_MAP = {
+            "self_attn_q_proj":   "self_attn.q_proj",
+            "self_attn_k_proj":   "self_attn.k_proj",
+            "self_attn_v_proj":   "self_attn.v_proj",
+            "self_attn_out_proj": "self_attn.out_proj",
+            "mlp_fc1":            "mlp.fc1",
+            "mlp_fc2":            "mlp.fc2",
+            "layer_norm1":        "layer_norm1",
+            "layer_norm2":        "layer_norm2",
+        }
+
+        def _a1111_te_to_param(key: str) -> str:
+            # "text_model_encoder_layers_N_suffix" → "text_model.encoder.layers.N.mapped_suffix"
+            m = re.match(r"text_model_encoder_layers_(\d+)_(.+)$", key)
+            if m:
+                idx, suffix = m.group(1), m.group(2)
+                mapped = _SUFFIX_MAP.get(suffix, suffix.replace("_", "."))
+                return f"text_model.encoder.layers.{idx}.{mapped}"
+            # top-level norms: "text_model_final_layer_norm" → "text_model.final_layer_norm"
+            return key.replace("_", ".", 1).replace("text.model", "text_model")
+
+        te_params = dict(text_encoder.named_parameters())
+        modified = 0
+
+        for base_key, parts in groups.items():
+            if "lora_down" not in parts or "lora_up" not in parts:
+                continue
+
+            lora_down = parts["lora_down"].float()
+            lora_up   = parts["lora_up"].float()
+            alpha_val = parts.get("alpha", None)
+            rank      = lora_down.shape[0]
+            alpha_scale = (float(alpha_val) / rank) if alpha_val is not None else 1.0
+            delta = (lora_up @ lora_down) * alpha_scale * lora_scale
+
+            param_name = _a1111_te_to_param(base_key) + ".weight"
+            if param_name in te_params:
+                param = te_params[param_name]
+                with torch.no_grad():
+                    param.add_(delta.to(device=param.device, dtype=param.dtype))
+                modified += 1
+            else:
+                logger.debug(f"_fuse_te_lora_manual: no param '{param_name}' in text encoder")
+
+        if modified:
+            logger.info(f"_fuse_te_lora_manual: fused {modified} TE LoRA layers manually")
+        return modified
+
+    except Exception as e:
+        logger.warning(f"_fuse_te_lora_manual: failed ({e}), TE LoRA not applied")
+
 from .pipeline import StreamDiffusion
 from .image_utils import postprocess_image
 
@@ -952,11 +1064,79 @@ class StreamDiffusionWrapper:
                 else:
                     stream.load_lcm_lora()
                 stream.fuse_lora()
+                # Clean up PEFT adapter state so subsequent LoRA loads start fresh
+                try:
+                    stream.pipe.unload_lora_weights()
+                except Exception:
+                    pass
 
             if lora_dict is not None:
+                logger.info(f"_load_model: Loading {len(lora_dict)} LoRA(s): {list(lora_dict.keys())}")
                 for lora_name, lora_scale in lora_dict.items():
-                    stream.load_lora(lora_name)
-                    stream.fuse_lora(lora_scale=lora_scale)
+                    import os as _os
+                    if not _os.path.exists(lora_name):
+                        logger.error(f"_load_model: LoRA file not found: '{lora_name}' — skipping")
+                        continue
+                    try:
+                        # Snapshot an attention weight before fusing to verify the LoRA has effect.
+                        # Use a cross-attention to_k weight since most LoRAs target these.
+                        _sd = stream.pipe.unet.state_dict()
+                        _probe_key = next(
+                            (k for k in _sd if "attn2.to_k.weight" in k or "attn1.to_k.weight" in k),
+                            next(iter(_sd))
+                        )
+                        _before = _sd[_probe_key].clone()
+                        del _sd
+
+                        stream.load_lora(lora_name)
+
+                        # Only fuse the components that the LoRA actually contains.
+                        # Asking for 'text_encoder' when the LoRA has no TE keys raises
+                        # "Invalid LoRA checkpoint" in diffusers >= 0.30.
+                        has_te = _lora_has_text_encoder_keys(lora_name)
+                        components = ["unet"] + (["text_encoder"] if has_te else [])
+
+                        # Check whether diffusers actually installed TE adapters.
+                        # diffusers 0.35 silently drops lora_te_ keys (A1111 format) and
+                        # warns "No LoRA keys associated to CLIPTextModel found".
+                        te_adapter_loaded = has_te and any(
+                            hasattr(m, "lora_A")
+                            for _, m in stream.pipe.text_encoder.named_modules()
+                        )
+
+                        try:
+                            stream.pipe.fuse_lora(lora_scale=lora_scale, components=components)
+                        except TypeError:
+                            # Older diffusers without components= parameter
+                            stream.fuse_lora(lora_scale=lora_scale, fuse_text_encoder=has_te)
+
+                        # Clean up PEFT state after fusing so the next LoRA loads clean
+                        try:
+                            stream.pipe.unload_lora_weights()
+                        except Exception:
+                            pass
+
+                        # If diffusers dropped the TE keys, fuse them manually
+                        if has_te and not te_adapter_loaded:
+                            _fuse_te_lora_manual(stream.pipe.text_encoder, lora_name, lora_scale)
+
+                        _after = stream.pipe.unet.state_dict()[_probe_key]
+                        _weights_changed = not torch.allclose(_before.float(), _after.float(), atol=1e-6)
+                        logger.info(
+                            f"_load_model: Loaded and fused LoRA '{lora_name}' "
+                            f"(scale={lora_scale}, components={components}, "
+                            f"te_manual={'yes' if has_te and not te_adapter_loaded else 'no'}, "
+                            f"unet_weights_changed={_weights_changed})"
+                        )
+                        if not _weights_changed:
+                            logger.warning(
+                                f"_load_model: LoRA '{lora_name}' fused but UNet probe weight unchanged — "
+                                "LoRA may have no effect (UNet-only LoRA with non-overlapping keys?)"
+                            )
+                    except Exception as e:
+                        import traceback as _tb
+                        logger.error(f"_load_model: Failed to load LoRA '{lora_name}': {e}")
+                        logger.error(_tb.format_exc())
 
         if use_tiny_vae:
             if vae_id is not None:
@@ -1097,7 +1277,8 @@ class StreamDiffusionWrapper:
                     use_lcm_lora=use_lcm_lora,
                     use_tiny_vae=use_tiny_vae,
                     ipadapter_scale=ipadapter_scale,
-                    ipadapter_tokens=ipadapter_tokens
+                    ipadapter_tokens=ipadapter_tokens,
+                    lora_dict=lora_dict,
                 )
                 vae_encoder_path = engine_manager.get_engine_path(
                     EngineType.VAE_ENCODER,

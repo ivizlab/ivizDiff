@@ -15,9 +15,9 @@
 #   e.g. PerfectPhotonV2 from CivitAI (convert to diffusers format first)
 #   model_id: "models/sd/PerfectPhotonV2.1"
 #
-model_id: "models/sd/PerfectPhotonV2.1"
+model_id: "C:/AI/models/Stable-diffusion/PerfectPhotonV2.1"
 
-t_index_list: [32, 45]
+t_index_list: [38, 45]
 output_type: "pt"
 
 width: 512
@@ -26,6 +26,10 @@ device: "cuda"
 dtype: "float16"
 delta: 0.7
 frame_buffer_size: 1
+
+# Constant Frame Rate — locks output cadence to reduce latent drift flicker
+cfr_enabled: true
+target_fps: 24
 use_lcm_lora: true
 use_tiny_vae: true
 
@@ -36,8 +40,8 @@ use_tiny_vae: true
 # RTX 5090 / Blackwell: do NOT use xformers — it will crash.
 # RTX 3090 / 4090: xformers is optional, tensorrt is faster.
 #
-acceleration: "tensorrt"
-#acceleration: "none"
+#acceleration: "tensorrt"
+acceleration: "none"
 
 engine_dir: "engines"
 
@@ -70,6 +74,20 @@ use_controlnet: true
 use_ipadapter: true
 use_streamv2v: false
 
+# ── Flicker reduction ──────────────────────────────────────────────────────────
+# Color histogram match: rolling EMA anchors colour temperature automatically.
+# No button needed — seeds itself on the first frame.
+color_match_enabled: true
+color_match_strength: 0.35
+color_match_rolling: true
+color_match_adapt_rate: 0.02
+
+# Latent feature bank: blends last N denoised latents to damp structural flicker.
+# Works with TensorRT. Increase weight slightly if composition still drifts.
+feature_bank_enabled: true
+feature_bank_size: 3
+feature_bank_weight: 0.15
+
 # IPAdapter — requires ip-adapter_sd15.bin and image_encoder in models/ipadapter/
 # Download from: https://huggingface.co/h94/IP-Adapter
 # Place files at:
@@ -82,6 +100,17 @@ ipadapters:
     scale: 0.70
     enabled: true
 
+# ── LoRAs ─────────────────────────────────────────────────────────────────────
+# Managed from the UI — use the LoRAs panel in Advanced Settings.
+# lora_dir sets the folder the browser scans (default: C:/AI/models/Lora15).
+#
+# IMPORTANT — TensorRT: LoRAs are fused before engines are built.
+# If you add/change a LoRA with existing engines, delete engines/ first.
+# For new LoRAs, test with acceleration: "none" first.
+#
+lora_dir: "C:/AI/models/Lora15"
+loras: []
+
 # ControlNet — sd15_tile runs locally from models/controlnet/sd15_tile/
 # Download from: https://huggingface.co/lllyasviel/control_v11f1e_sd15_tile
 # Place the full diffusers-format folder at: models/controlnet/sd15_tile/
@@ -91,7 +120,7 @@ ipadapters:
 #
 controlnets:
   - model_id: "models/controlnet/sd15_tile"
-    conditioning_scale: 0.2
+    conditioning_scale: 0.4
     preprocessor: "feedback"
     preprocessor_params:
       feedback_strength: 0.20

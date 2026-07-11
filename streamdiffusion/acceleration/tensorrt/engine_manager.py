@@ -68,7 +68,7 @@ class EngineManager:
             }
         }
     
-    def get_engine_path(self, 
+    def get_engine_path(self,
                        engine_type: EngineType,
                        model_id_or_path: str,
                        max_batch: int,
@@ -78,7 +78,8 @@ class EngineManager:
                        use_tiny_vae: bool,
                        ipadapter_scale: Optional[float] = None,
                        ipadapter_tokens: Optional[int] = None,
-                       controlnet_model_id: Optional[str] = None) -> Path:
+                       controlnet_model_id: Optional[str] = None,
+                       lora_dict: Optional[Dict] = None) -> Path:
         """
         Generate engine path using wrapper.py's current logic.
         
@@ -111,9 +112,18 @@ class EngineManager:
             # (ipadapter_scale remains a parameter for backward-compatibility but is ignored here)
             if ipadapter_tokens is not None:
                 prefix += f"--tokens{ipadapter_tokens}"
-            
+
+            # LoRAs are fused into PyTorch weights before TRT compilation, so the engine
+            # bakes them in. Include a short hash of the lora set so that changing LoRAs
+            # produces a different engine path (triggering a rebuild).
+            if lora_dict and engine_type == EngineType.UNET:
+                import hashlib
+                lora_sig = "|".join(f"{k}:{v:.4f}" for k, v in sorted(lora_dict.items()))
+                lora_hash = hashlib.sha256(lora_sig.encode()).hexdigest()[:8]
+                prefix += f"--lora-{lora_hash}"
+
             prefix += f"--mode-{mode}"
-            
+
             return self.engine_dir / prefix / filename
     
     def _get_embedding_dim_for_model_type(self, model_type: str) -> int:

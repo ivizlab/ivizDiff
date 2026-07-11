@@ -1,4 +1,5 @@
 import time
+import collections
 from typing import List, Optional, Union, Any, Dict, Tuple, Literal
 
 import numpy as np
@@ -107,6 +108,27 @@ class StreamDiffusion:
         self.embedding_hooks: List[EmbeddingHook] = []
         self.unet_hooks: List[UnetHook] = []
 
+        # Denoised-latent feature bank for temporal consistency.
+        # Stores the last N x_0_pred_out tensors and blends them into the
+        # current frame before VAE decode.  Works with TensorRT.
+        self.feature_bank_enabled: bool = False
+        self.feature_bank_size: int = 3
+        self.feature_bank_weight: float = 0.2
+        self._feature_bank: collections.deque = collections.deque(maxlen=3)
+
+    def reset_feature_bank(self) -> None:
+        """Clear the feature bank (call when prompt changes to avoid contamination)."""
+        self._feature_bank.clear()
+
+    def set_feature_bank_size(self, n: int) -> None:
+        """Resize the feature bank, preserving existing entries up to the new limit."""
+        n = max(1, int(n))
+        if self._feature_bank.maxlen != n:
+            self._feature_bank = collections.deque(
+                list(self._feature_bank)[-n:], maxlen=n
+            )
+        self.feature_bank_size = n
+
     def load_lcm_lora(
         self,
         pretrained_model_name_or_path_or_dict: Union[
@@ -140,12 +162,26 @@ class StreamDiffusion:
         lora_scale: float = 1.0,
         safe_fusing: bool = False,
     ) -> None:
-        self.pipe.fuse_lora(
-            fuse_unet=fuse_unet,
-            fuse_text_encoder=fuse_text_encoder,
-            lora_scale=lora_scale,
-            safe_fusing=safe_fusing,
-        )
+        # diffusers >= 0.30: fuse_unet/fuse_text_encoder are removed; use components= instead.
+        # diffusers < 0.30: components= doesn't exist; fall back to old kwargs.
+        try:
+            components = []
+            if fuse_unet:
+                components.append("unet")
+            if fuse_text_encoder:
+                components.append("text_encoder")
+            self.pipe.fuse_lora(
+                lora_scale=lora_scale,
+                safe_fusing=safe_fusing,
+                components=components,
+            )
+        except TypeError:
+            self.pipe.fuse_lora(
+                fuse_unet=fuse_unet,
+                fuse_text_encoder=fuse_text_encoder,
+                lora_scale=lora_scale,
+                safe_fusing=safe_fusing,
+            )
 
     def enable_similar_image_filter(self, threshold: float = 0.98, max_skip_frame: float = 10) -> None:
         self.similar_image_filter = True
@@ -787,7 +823,18 @@ class StreamDiffusion:
             )
         
         x_0_pred_out = self.predict_x0_batch(x_t_latent)
-        
+
+        # --- Denoised-latent feature bank ---
+        # Store the RAW (unblended) latent so the bank never accumulates
+        # blended values — that would create a feedback loop.
+        self._feature_bank.append(x_0_pred_out.detach().clone())
+        if self.feature_bank_enabled and len(self._feature_bank) > 1:
+            bank_mean = torch.stack(list(self._feature_bank)[:-1]).mean(dim=0)
+            x_0_pred_out = (
+                x_0_pred_out * (1.0 - self.feature_bank_weight)
+                + bank_mean * self.feature_bank_weight
+            )
+
         x_output = self.decode_image(x_0_pred_out).detach().clone()
 
         self.prev_image_result = x_output

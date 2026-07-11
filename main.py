@@ -27,6 +27,7 @@ from pathlib import Path
 from PIL import Image, PngImagePlugin
 import yaml
 
+import numpy as np
 from config import config, Args
 from util import pil_to_frame, pt_to_frame, bytes_to_pil, bytes_to_pt
 from connection_manager import ConnectionManager, ServerFullException
@@ -125,6 +126,8 @@ class App:
         self.uploaded_controlnet_config = None
         self.runtime_controlnet_config = None  # Active runtime config (starts from YAML)
         self.config_needs_reload = False  # Track when pipeline needs recreation
+        self._pipeline_building = False   # Guards against concurrent pipeline creation
+        self.lora_trigger_words: str = ""  # Concatenated trigger words for enabled LoRAs
         # Store current resolution for pipeline recreation
         self.new_width = 512
         self.new_height = 512
@@ -134,6 +137,7 @@ class App:
         # VirtCam subprocess
         self.virtcam_process = None
         self.virtcam_video_path = None
+        self.virtcam_speed = 1  # slowdown factor: 1=normal, 2=half speed, …, 5=5× slower
         _repo_root = Path(__file__).parent
         self._virtcam_script = _repo_root / "utils" / "virtcam.py"
         self._source_video_dir = _repo_root / "videos" / "input"
@@ -141,6 +145,21 @@ class App:
         self.last_output_image: Image.Image | None = None
         # Output upscaling (1 = off, 2 = 2x Lanczos)
         self.upscale_factor: int = 1
+        # Constant Frame Rate (CFR) pacing
+        self.cfr_enabled: bool = False
+        self.target_fps: int = 24
+        # Color histogram match post-processing
+        self.color_match_enabled: bool = False
+        self.color_match_strength: float = 0.4
+        self.color_match_reference: np.ndarray | None = None  # BGR uint8
+        # Rolling reference: if True, reference slowly tracks output via EMA
+        # instead of being locked to a single captured frame
+        self.color_match_rolling: bool = True
+        self.color_match_adapt_rate: float = 0.02  # ~50 frames to fully adapt
+        # Latent feature bank for structural temporal consistency
+        self.feature_bank_enabled: bool = False
+        self.feature_bank_size: int = 3
+        self.feature_bank_weight: float = 0.2
         # Initialize input manager for controller support
         self.input_manager = InputManager()
         # Breath detection source — connects to breath.py WebSocket server
@@ -149,6 +168,8 @@ class App:
         self.video_input_manager = VideoInputManager()
         self.video_input_active = False
         self.video_input_mode = "webcam"  # "webcam" or "video_file"
+        # LoRA folder — can be overridden by lora_dir in YAML config
+        self.lora_dir = Path("C:/AI/models/Lora15")
         self.init_app()
         if self.args.config:
             self._load_yaml_config(self.args.config)
@@ -275,6 +296,26 @@ class App:
                         self.new_height = config_height
             if 'video_input_dir' in config_data:
                 self._source_video_dir = Path(config_data['video_input_dir'])
+            if 'lora_dir' in config_data:
+                self.lora_dir = Path(config_data['lora_dir'])
+            if 'cfr_enabled' in config_data:
+                self.cfr_enabled = bool(config_data['cfr_enabled'])
+            if 'target_fps' in config_data:
+                self.target_fps = max(1, int(config_data['target_fps']))
+            if 'color_match_enabled' in config_data:
+                self.color_match_enabled = bool(config_data['color_match_enabled'])
+            if 'color_match_strength' in config_data:
+                self.color_match_strength = float(config_data['color_match_strength'])
+            if 'color_match_rolling' in config_data:
+                self.color_match_rolling = bool(config_data['color_match_rolling'])
+            if 'color_match_adapt_rate' in config_data:
+                self.color_match_adapt_rate = float(config_data['color_match_adapt_rate'])
+            if 'feature_bank_enabled' in config_data:
+                self.feature_bank_enabled = bool(config_data['feature_bank_enabled'])
+            if 'feature_bank_size' in config_data:
+                self.feature_bank_size = max(1, int(config_data['feature_bank_size']))
+            if 'feature_bank_weight' in config_data:
+                self.feature_bank_weight = float(config_data['feature_bank_weight'])
             logger.info(f"_load_yaml_config: Loaded config from {path}")
         except Exception as e:
             logger.error(f"_load_yaml_config: Failed to load config {path}: {e}")
@@ -427,6 +468,144 @@ class App:
 
             current_config.append(config)
         return current_config
+
+    def _get_inner_stream(self):
+        """Return the inner StreamDiffusion instance, or None if not available."""
+        try:
+            s = self.pipeline.stream
+            return s.stream if hasattr(s, 'stream') else s
+        except Exception:
+            return None
+
+    def _postprocess_frame(self, image, output_type: str) -> bytes:
+        """
+        Run all CPU-heavy post-processing in a thread executor:
+          1. Color histogram match (cv2, EMA reference update)
+          2. Snapshot capture (for /api/snapshot)
+          3. Upscale (optional Lanczos)
+          4. JPEG encode → multipart bytes
+
+        Called via loop.run_in_executor so the event loop is never blocked.
+        """
+        # --- Color histogram match ---
+        if self.color_match_enabled:
+            try:
+                if output_type == "pt":
+                    _t = image[0] if image.dim() == 4 else image
+                    _src_rgb = (_t.permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype("uint8")
+                else:
+                    _src_rgb = np.array(image)
+                _src_bgr = cv2.cvtColor(_src_rgb, cv2.COLOR_RGB2BGR)
+
+                if self.color_match_rolling:
+                    if self.color_match_reference is None:
+                        self.color_match_reference = _src_bgr.astype("float32")
+                    else:
+                        r = self.color_match_adapt_rate
+                        self.color_match_reference = (
+                            (1.0 - r) * self.color_match_reference
+                            + r * _src_bgr.astype("float32")
+                        )
+
+                if self.color_match_reference is not None:
+                    _ref = np.clip(self.color_match_reference, 0, 255).astype("uint8")
+                    _matched_bgr = self._apply_color_match(_src_bgr, _ref, self.color_match_strength)
+                    _matched_rgb = cv2.cvtColor(_matched_bgr, cv2.COLOR_BGR2RGB)
+                    if output_type == "pt":
+                        _matched_t = torch.from_numpy(_matched_rgb.astype("float32") / 255.0).permute(2, 0, 1)
+                        image = _matched_t.unsqueeze(0).to(_t.device, _t.dtype) if image.dim() == 4 else _matched_t.to(_t.device, _t.dtype)
+                    else:
+                        image = Image.fromarray(_matched_rgb)
+            except Exception as _cm_err:
+                logger.warning(f"color_match: {_cm_err}")
+
+        # --- Snapshot cache ---
+        try:
+            if output_type == "pt":
+                t = image[0] if image.dim() == 4 else image
+                t_uint8 = (t * 255).clamp(0, 255).to(torch.uint8)
+                self.last_output_image = Image.fromarray(t_uint8.permute(1, 2, 0).cpu().numpy())
+            else:
+                self.last_output_image = image.copy() if hasattr(image, 'copy') else image
+        except Exception as _snap_err:
+            logger.warning(f"snapshot capture failed: {_snap_err}")
+
+        # --- Upscale + JPEG encode ---
+        if self.upscale_factor > 1:
+            if output_type == "pt":
+                t = image[0] if image.dim() == 4 else image
+                pil_image = Image.fromarray(
+                    (t.permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype("uint8")
+                )
+            else:
+                pil_image = image
+            w, h = pil_image.size
+            pil_image = pil_image.resize(
+                (w * self.upscale_factor, h * self.upscale_factor), Image.LANCZOS
+            )
+            return pil_to_frame(pil_image)
+        elif output_type == "pt":
+            return pt_to_frame(image)
+        else:
+            return pil_to_frame(image)
+
+    def _apply_feature_bank_settings(self) -> None:
+        """Push current feature bank settings into the live pipeline."""
+        sd = self._get_inner_stream()
+        if sd is None:
+            return
+        sd.feature_bank_enabled = self.feature_bank_enabled
+        sd.feature_bank_weight = self.feature_bank_weight
+        if hasattr(sd, 'set_feature_bank_size'):
+            sd.set_feature_bank_size(self.feature_bank_size)
+
+    def _post_pipeline_build(self) -> None:
+        """Run once after every pipeline build or rebuild.
+
+        1. Push feature-bank settings so YAML feature_bank_enabled actually takes effect.
+        2. Re-run _recalculate_timestep_dependent_params with the pipeline's own t_list —
+           this seeds _desired_t_index_list in the fresh StreamParameterUpdater, which
+           prevents the 'Step 1 nudge needed after LoRA apply' regression where the
+           denoising tensors are in a partially-uninitialised state until the user
+           manually moves a timestep slider.
+        3. Reset colour-match reference so the new session isn't anchored to the look
+           of the old session.
+        """
+        self._apply_feature_bank_settings()
+        self.color_match_reference = None
+        try:
+            sd = self._get_inner_stream()
+            if sd is not None and hasattr(sd, 't_list') and sd.t_list:
+                self.pipeline.update_stream_params(t_index_list=list(sd.t_list))
+        except Exception as _e:
+            logger.warning(f"_post_pipeline_build: t_index_list re-apply failed: {_e}")
+
+    def _apply_color_match(self, source_bgr: np.ndarray, reference_bgr: np.ndarray, strength: float) -> np.ndarray:
+        """
+        Match the color cast of source to reference using mean/std transfer in LAB space.
+        Only the A and B channels (color) are matched — L (luminance) is left unchanged
+        so brightness dynamics are preserved.
+        strength: 0.0 = no change, 1.0 = full match.
+        """
+        src_lab = cv2.cvtColor(source_bgr, cv2.COLOR_BGR2LAB).astype("float32")
+        ref_lab = cv2.cvtColor(reference_bgr, cv2.COLOR_BGR2LAB).astype("float32")
+
+        matched = src_lab.copy()
+        # Channels 1 (A) and 2 (B) carry warm/cool and green/magenta cast
+        for ch in (1, 2):
+            s_mean = src_lab[:, :, ch].mean()
+            s_std  = src_lab[:, :, ch].std()
+            r_mean = ref_lab[:, :, ch].mean()
+            r_std  = ref_lab[:, :, ch].std()
+            if s_std > 1e-6:
+                matched[:, :, ch] = (src_lab[:, :, ch] - s_mean) * (r_std / (s_std + 1e-6)) + r_mean
+
+        matched = np.clip(matched, 0, 255).astype("uint8")
+        result_bgr = cv2.cvtColor(matched, cv2.COLOR_LAB2BGR)
+
+        if strength >= 1.0:
+            return result_bgr
+        return cv2.addWeighted(source_bgr, 1.0 - strength, result_bgr, strength, 0)
 
     def init_app(self):
         # Enhanced CORS for API-only development mode
@@ -586,65 +765,77 @@ class App:
         @self.app.get("/api/stream/{user_id}")
         async def stream(user_id: uuid.UUID, request: Request):
             try:
-                # Create pipeline if it doesn't exist yet
-                if self.pipeline is None:
-                    if self.uploaded_controlnet_config:
-                        logger.info("stream: Creating pipeline with ControlNet config...")
-                        self.pipeline = self._create_pipeline_with_config()
-                    else:
-                        logger.info("stream: Creating default pipeline...")
-                        self.pipeline = self._create_default_pipeline()
-                    logger.info("stream: Pipeline created successfully")
+                _loop = asyncio.get_event_loop()
+
+                async def _ensure_pipeline_built(build_fn):
+                    """Run blocking pipeline build in a thread; event loop stays responsive.
+                    If another build is already running, waits for it to finish."""
+                    if self._pipeline_building:
+                        logger.warning("stream: pipeline build already in progress — waiting")
+                        while self._pipeline_building:
+                            await asyncio.sleep(0.5)
+                        return
+                    self._pipeline_building = True
                     try:
-                        acc = getattr(self.args, 'acceleration', None)
-                        logger.debug(f"stream: acceleration={acc}, use_config={getattr(self.pipeline, 'use_config', False)}")
-                        stream_obj = getattr(self.pipeline, 'stream', None)
-                        unet_obj = getattr(stream_obj, 'unet', None)
-                        is_trt = unet_obj is not None and hasattr(unet_obj, 'engine') and hasattr(unet_obj, 'stream')
-                        logger.debug(f"stream: unet_is_trt={is_trt}, has_ipadapter={getattr(self.pipeline, 'has_ipadapter', False)}")
-                        if is_trt:
-                            logger.debug(f"stream: unet.use_ipadapter={getattr(unet_obj, 'use_ipadapter', None)}, num_ip_layers={getattr(unet_obj, 'num_ip_layers', None)}")
-                        if hasattr(stream_obj, 'ipadapter_scale'):
-                            try:
-                                scale_val = getattr(stream_obj, 'ipadapter_scale')
-                                if hasattr(scale_val, 'shape'):
-                                    logger.debug(f"stream: ipadapter_scale tensor shape={tuple(scale_val.shape)}")
-                                else:
-                                    logger.debug(f"stream: ipadapter_scale scalar={scale_val}")
-                            except Exception:
-                                pass
-                        logger.debug(f"stream: ipadapter_weight_type={getattr(stream_obj, 'ipadapter_weight_type', None)}")
-                    except Exception:
-                        logger.exception("stream: failed to log pipeline state after creation")
-                
-                # Recreate pipeline if config changed (but not resolution - that's handled separately)
-                elif self.config_needs_reload or (self.uploaded_controlnet_config and not (self.pipeline.use_config and self.pipeline.config and 'controlnets' in self.pipeline.config)) or (self.uploaded_controlnet_config and not self.pipeline.use_config):
-                    if self.config_needs_reload:
-                        logger.info("stream: Recreating pipeline with new ControlNet config...")
-                    else:
-                        logger.info("stream: Upgrading to ControlNet pipeline...")
-                    
-                    # Properly cleanup the old pipeline before creating new one
-                    old_pipeline = self.pipeline
-                    self.pipeline = None
-                    
-                    if old_pipeline:
-                        self._cleanup_pipeline(old_pipeline)
-                        old_pipeline = None
-                    
-                    # Create new pipeline
-                    if self.uploaded_controlnet_config:
-                        self.pipeline = self._create_pipeline_with_config()
-                    else:
-                        self.pipeline = self._create_default_pipeline()
-                    
-                    self.config_needs_reload = False  # Reset the flag
-                    logger.info("stream: Pipeline recreated successfully")
+                        self.pipeline = await _loop.run_in_executor(None, build_fn)
+                    finally:
+                        self._pipeline_building = False
 
                 async def generate():
                     loop = asyncio.get_event_loop()
+                    logger.info(f"generate: started for user {user_id} | pipeline={self.pipeline is not None} config_needs_reload={self.config_needs_reload}")
+
+                    # ── Pipeline setup ──────────────────────────────────────────────────
+                    # This runs INSIDE the generator so that StreamingResponse is returned
+                    # immediately. HTTP 200 + multipart headers reach the browser before
+                    # any model loading begins, preventing browser timeout during rebuild.
+                    try:
+                        if self.pipeline is None:
+                            build_label = "ControlNet" if self.uploaded_controlnet_config else "default"
+                            logger.info(f"stream: Creating {build_label} pipeline...")
+                            build_fn = self._create_pipeline_with_config if self.uploaded_controlnet_config else self._create_default_pipeline
+                            await _ensure_pipeline_built(build_fn)
+                            self.config_needs_reload = False
+                            self._post_pipeline_build()
+                            logger.info("stream: Pipeline created successfully")
+                            try:
+                                acc = getattr(self.args, 'acceleration', None)
+                                logger.debug(f"stream: acceleration={acc}, use_config={getattr(self.pipeline, 'use_config', False)}")
+                                stream_obj = getattr(self.pipeline, 'stream', None)
+                                unet_obj = getattr(stream_obj, 'unet', None)
+                                is_trt = unet_obj is not None and hasattr(unet_obj, 'engine') and hasattr(unet_obj, 'stream')
+                                logger.debug(f"stream: unet_is_trt={is_trt}, has_ipadapter={getattr(self.pipeline, 'has_ipadapter', False)}")
+                            except Exception:
+                                logger.exception("stream: failed to log pipeline state after creation")
+
+                        elif self.config_needs_reload or (self.uploaded_controlnet_config and not (self.pipeline.use_config and self.pipeline.config and 'controlnets' in self.pipeline.config)) or (self.uploaded_controlnet_config and not self.pipeline.use_config):
+                            loras = (self.uploaded_controlnet_config or {}).get('loras', [])
+                            logger.info(f"stream: Recreating pipeline (LoRA/config change) | loras={len(loras)} ...")
+                            old_pipeline = self.pipeline
+                            self.pipeline = None
+                            if old_pipeline:
+                                logger.info("stream: Cleaning up old pipeline...")
+                                await loop.run_in_executor(None, self._cleanup_pipeline, old_pipeline)
+                                logger.info("stream: Old pipeline cleanup done")
+                            build_fn = self._create_pipeline_with_config if self.uploaded_controlnet_config else self._create_default_pipeline
+                            logger.info(f"stream: Building new pipeline with {build_fn.__name__} ...")
+                            await _ensure_pipeline_built(build_fn)
+                            self.config_needs_reload = False
+                            self._post_pipeline_build()
+                            logger.info(f"stream: Pipeline recreated successfully | pipeline={self.pipeline is not None}")
+
+                    except Exception:
+                        logger.exception("stream: pipeline build/recreate failed — aborting stream")
+                        return  # closes the generator; browser sees end-of-multipart
+
+                    # ── Frame generation loop ────────────────────────────────────────
                     # Kick off the very first frame request before entering the loop.
                     await self.conn_manager.send_json(user_id, {"status": "send_frame"})
+
+                    # CFR: track when the PREVIOUS frame was yielded.
+                    # Each iteration we sleep only the remaining gap to hit target period.
+                    # If processing already exceeded the period, sleep = 0 (no catch-up).
+                    _cfr_last_yield = time.perf_counter()
 
                     while True:
                         frame_start_time = time.time()
@@ -653,6 +844,12 @@ class App:
                         params = await self.conn_manager.get_latest_data(user_id)
                         t_after_wait = time.time()
                         if params is None:
+                            # If the user is gone (disconnected), stop this generator.
+                            # Without this check the coroutine either hangs forever at
+                            # queue.get() or spins in a tight loop starving the event loop.
+                            if not self.conn_manager.check_user(user_id):
+                                logger.info(f"generate: user {user_id} disconnected — stopping stream")
+                                return
                             # No frame yet — re-request and retry
                             await self.conn_manager.send_json(
                                 user_id, {"status": "send_frame"}
@@ -676,60 +873,50 @@ class App:
                                 logger.error("generate: predict returned None image; skipping frame")
                                 continue
 
-                            # Cache latest frame for snapshot endpoint
-                            try:
-                                if self.pipeline.output_type == "pt":
-                                    t = image[0] if image.dim() == 4 else image
-                                    t_uint8 = (t * 255).clamp(0, 255).to(torch.uint8)
-                                    self.last_output_image = Image.fromarray(
-                                        t_uint8.permute(1, 2, 0).cpu().numpy()
-                                    )
-                                else:
-                                    self.last_output_image = image.copy() if hasattr(image, 'copy') else image
-                            except Exception as _snap_err:
-                                logger.warning(f"snapshot capture failed: {_snap_err}")
-
-                            # --- Phase 3: encode to JPEG bytes ---
-                            if self.upscale_factor > 1:
-                                if self.pipeline.output_type == "pt":
-                                    t = image[0] if image.dim() == 4 else image
-                                    pil_image = Image.fromarray(
-                                        (t.permute(1, 2, 0).clamp(0, 1).cpu().numpy() * 255).astype("uint8")
-                                    )
-                                else:
-                                    pil_image = image
-                                w, h = pil_image.size
-                                image = pil_image.resize(
-                                    (w * self.upscale_factor, h * self.upscale_factor), Image.LANCZOS
-                                )
-                                frame = pil_to_frame(image)
-                            elif self.pipeline.output_type == "pt":
-                                frame = pt_to_frame(image)
-                            else:
-                                frame = pil_to_frame(image)
+                            # --- Phase 3: post-process + encode (in executor, non-blocking) ---
+                            # Color match, snapshot cache, upscale, JPEG encode all run
+                            # in a thread so the event loop stays free for WebSocket I/O.
+                            frame = await loop.run_in_executor(
+                                None, self._postprocess_frame, image, self.pipeline.output_type
+                            )
                             t_after_encode = time.time()
                         except Exception as e:
                             logger.exception(f"generate: predict failed with exception: {e}")
                             continue
 
-                        # --- Update rolling timing counters ---
+                        # --- Per-phase timing (processing only, excludes CFR sleep) ---
                         _WINDOW = 30
                         frame_time = t_after_encode - frame_start_time
                         wait_ms   = (t_after_wait    - frame_start_time) * 1000
                         pred_ms   = (t_after_predict  - t_after_wait)    * 1000
                         enc_ms    = (t_after_encode   - t_after_predict) * 1000
 
-                        self.fps_counter.append(frame_time)
                         self.timing_wait_ms.append(wait_ms)
                         self.timing_predict_ms.append(pred_ms)
                         self.timing_encode_ms.append(enc_ms)
+
+                        # --- CFR pacing ---
+                        # Sleep only the remaining gap between last yield and next target.
+                        # If processing already took longer than the period, sleep = 0.
+                        _cfr_on = self.cfr_enabled
+                        _cfr_sleep = 0.0
+                        if _cfr_on:
+                            _frame_period = 1.0 / max(1, self.target_fps)
+                            _cfr_sleep = (_cfr_last_yield + _frame_period) - time.perf_counter()
+                            if _cfr_sleep > 0.0:
+                                await asyncio.sleep(_cfr_sleep)
+
+                        # --- fps_counter: delivery cadence (includes CFR sleep) ---
+                        t_after_cfr = time.time()
+                        delivery_time = t_after_cfr - frame_start_time
+                        self.fps_counter.append(delivery_time)
                         if len(self.fps_counter) > _WINDOW:
                             self.fps_counter.pop(0)
                             self.timing_wait_ms.pop(0)
                             self.timing_predict_ms.pop(0)
                             self.timing_encode_ms.pop(0)
 
-                        # --- Auto-warn on slow FPS (throttled to once per 5 s) ---
+                        # --- Auto-warn on slow GPU processing (throttled to once per 5 s) ---
                         fps_now = 1.0 / frame_time if frame_time > 0 else 0
                         _now = time.time()
                         if fps_now < 20 and (_now - self._last_slow_warn) > 5.0:
@@ -740,17 +927,15 @@ class App:
                                 reserv = torch.cuda.memory_reserved() / 1e9
                                 _cuda_info = f" | CUDA alloc={alloc:.2f}GB reserved={reserv:.2f}GB"
                             logger.warning(
-                                f"PERF DROP: {fps_now:.1f} fps | "
+                                f"PERF DROP: {fps_now:.1f} fps (gpu) | "
                                 f"wait={wait_ms:.0f}ms predict={pred_ms:.0f}ms encode={enc_ms:.0f}ms"
                                 f"{_cuda_info}"
                             )
 
                         yield frame
+                        _cfr_last_yield = time.perf_counter()  # record actual yield time
                         if self.args.debug:
-                            logger.debug(f"Time taken: {frame_time*1000:.1f}ms (wait={wait_ms:.0f} pred={pred_ms:.0f} enc={enc_ms:.0f})")
-                        
-                        # Add delay for testing - 1 frame per second
-                        # await asyncio.sleep(1.0)
+                            logger.debug(f"gpu={frame_time*1000:.1f}ms delivery={delivery_time*1000:.1f}ms cfr_sleep={_cfr_sleep*1000:.0f}ms (wait={wait_ms:.0f} pred={pred_ms:.0f} enc={enc_ms:.0f})")
 
                 return StreamingResponse(
                     generate(),
@@ -888,6 +1073,16 @@ class App:
                     "seed_blending": seed_blending_config,
                     "normalize_prompt_weights": normalize_prompt_weights,
                     "normalize_seed_weights": normalize_seed_weights,
+                    "cfr_enabled": self.cfr_enabled,
+                    "target_fps": self.target_fps,
+                    "color_match_enabled": self.color_match_enabled,
+                    "color_match_strength": self.color_match_strength,
+                    "color_match_has_reference": self.color_match_reference is not None,
+                    "feature_bank_enabled": self.feature_bank_enabled,
+                    "feature_bank_size": self.feature_bank_size,
+                    "feature_bank_weight": self.feature_bank_weight,
+                    "loras": (self.uploaded_controlnet_config or {}).get("loras", []),
+                    "lora_dir": str(self.lora_dir).replace("\\", "/"),
                 }
             )
 
@@ -952,6 +1147,24 @@ class App:
                 if 'video_input_dir' in config_data:
                     self._source_video_dir = Path(config_data['video_input_dir'])
                     logger.info(f"upload_controlnet_config: video_input_dir set to {self._source_video_dir}")
+
+                # Update CFR settings if specified in config
+                if 'cfr_enabled' in config_data:
+                    self.cfr_enabled = bool(config_data['cfr_enabled'])
+                if 'target_fps' in config_data:
+                    self.target_fps = max(1, int(config_data['target_fps']))
+                # Update color match settings if specified in config
+                if 'color_match_enabled' in config_data:
+                    self.color_match_enabled = bool(config_data['color_match_enabled'])
+                if 'color_match_strength' in config_data:
+                    self.color_match_strength = float(config_data['color_match_strength'])
+                # Update feature bank settings if specified in config
+                if 'feature_bank_enabled' in config_data:
+                    self.feature_bank_enabled = bool(config_data['feature_bank_enabled'])
+                if 'feature_bank_size' in config_data:
+                    self.feature_bank_size = max(1, int(config_data['feature_bank_size']))
+                if 'feature_bank_weight' in config_data:
+                    self.feature_bank_weight = float(config_data['feature_bank_weight'])
 
                 # Normalize prompt and seed configurations for frontend
                 normalized_prompt_blending = self._normalize_prompt_config(config_data)
@@ -1081,7 +1294,9 @@ class App:
                 
                 await self._async_pipeline_update(controlnet_config=current_config)
                 logger.info(f"update_controlnet_strength: update_stream_params call completed")
-                    
+                # Clear colour-match reference so the rolling EMA doesn't fight the new look
+                self.color_match_reference = None
+
                 return JSONResponse({
                     "status": "success",
                     "message": f"Updated ControlNet {controlnet_index} strength to {strength}"
@@ -1434,8 +1649,10 @@ class App:
                 
                 # Update IPAdapter scale in the pipeline
                 success = self.pipeline.update_ipadapter_scale(float(scale))
-                
+
                 if success:
+                    # Clear colour-match reference so the rolling EMA doesn't fight the new look
+                    self.color_match_reference = None
                     return JSONResponse({
                         "status": "success",
                         "message": f"Updated IPAdapter scale to {scale}"
@@ -1693,6 +1910,184 @@ class App:
         @self.app.get("/api/upscale")
         async def get_upscale():
             return JSONResponse({"upscale_factor": self.upscale_factor})
+
+        @self.app.post("/api/cfr")
+        async def set_cfr(request: Request):
+            """Enable/disable Constant Frame Rate pacing and set target FPS."""
+            data = await request.json()
+            if "enabled" in data:
+                self.cfr_enabled = bool(data["enabled"])
+            if "target_fps" in data:
+                fps = int(data["target_fps"])
+                if fps < 1 or fps > 120:
+                    raise HTTPException(status_code=400, detail="target_fps must be between 1 and 120")
+                self.target_fps = fps
+            return JSONResponse({
+                "status": "success",
+                "cfr_enabled": self.cfr_enabled,
+                "target_fps": self.target_fps,
+            })
+
+        @self.app.get("/api/cfr")
+        async def get_cfr():
+            """Return current CFR settings."""
+            return JSONResponse({
+                "cfr_enabled": self.cfr_enabled,
+                "target_fps": self.target_fps,
+            })
+
+        @self.app.post("/api/color-match")
+        async def set_color_match(request: Request):
+            """Enable/disable color histogram match and set blend strength."""
+            data = await request.json()
+            if "enabled" in data:
+                self.color_match_enabled = bool(data["enabled"])
+            if "strength" in data:
+                s = float(data["strength"])
+                if not (0.0 <= s <= 1.0):
+                    raise HTTPException(status_code=400, detail="strength must be 0.0–1.0")
+                self.color_match_strength = s
+            return JSONResponse({
+                "status": "success",
+                "color_match_enabled": self.color_match_enabled,
+                "color_match_strength": self.color_match_strength,
+                "has_reference": self.color_match_reference is not None,
+            })
+
+        @self.app.get("/api/color-match")
+        async def get_color_match():
+            """Return current color match settings."""
+            return JSONResponse({
+                "color_match_enabled": self.color_match_enabled,
+                "color_match_strength": self.color_match_strength,
+                "has_reference": self.color_match_reference is not None,
+            })
+
+        @self.app.post("/api/color-match/capture-reference")
+        async def capture_color_reference():
+            """Capture the current output frame as the color match reference."""
+            if self.last_output_image is None:
+                raise HTTPException(status_code=400, detail="No output frame available yet — start the stream first")
+            try:
+                src_rgb = np.array(self.last_output_image)
+                self.color_match_reference = cv2.cvtColor(src_rgb, cv2.COLOR_RGB2BGR)
+                return JSONResponse({"status": "success", "message": "Color reference captured"})
+            except Exception as e:
+                raise HTTPException(status_code=500, detail=f"Failed to capture reference: {e}")
+
+        @self.app.post("/api/color-match/clear-reference")
+        async def clear_color_reference():
+            """Clear the color match reference (disables matching until a new one is captured)."""
+            self.color_match_reference = None
+            return JSONResponse({"status": "success", "message": "Color reference cleared"})
+
+        @self.app.post("/api/feature-bank")
+        async def set_feature_bank(request: Request):
+            """Enable/disable latent feature bank and set size and blend weight."""
+            data = await request.json()
+            if "enabled" in data:
+                self.feature_bank_enabled = bool(data["enabled"])
+            if "size" in data:
+                s = int(data["size"])
+                if not (1 <= s <= 8):
+                    raise HTTPException(status_code=400, detail="size must be 1–8")
+                self.feature_bank_size = s
+            if "weight" in data:
+                w = float(data["weight"])
+                if not (0.0 <= w <= 1.0):
+                    raise HTTPException(status_code=400, detail="weight must be 0.0–1.0")
+                self.feature_bank_weight = w
+            self._apply_feature_bank_settings()
+            return JSONResponse({
+                "status": "success",
+                "feature_bank_enabled": self.feature_bank_enabled,
+                "feature_bank_size": self.feature_bank_size,
+                "feature_bank_weight": self.feature_bank_weight,
+            })
+
+        @self.app.get("/api/feature-bank")
+        async def get_feature_bank():
+            """Return current feature bank settings."""
+            sd = self._get_inner_stream()
+            bank_len = len(sd._feature_bank) if sd and hasattr(sd, '_feature_bank') else 0
+            return JSONResponse({
+                "feature_bank_enabled": self.feature_bank_enabled,
+                "feature_bank_size": self.feature_bank_size,
+                "feature_bank_weight": self.feature_bank_weight,
+                "bank_frames_stored": bank_len,
+            })
+
+        @self.app.post("/api/feature-bank/reset")
+        async def reset_feature_bank():
+            """Clear the feature bank (useful after a large prompt or style change)."""
+            sd = self._get_inner_stream()
+            if sd and hasattr(sd, 'reset_feature_bank'):
+                sd.reset_feature_bank()
+            return JSONResponse({"status": "success", "message": "Feature bank cleared"})
+
+        @self.app.get("/api/loras")
+        async def get_loras():
+            """Return available LoRA files from lora_dir and the current active list."""
+            available = []
+            try:
+                if self.lora_dir.exists():
+                    for f in sorted(self.lora_dir.glob("*.safetensors")):
+                        available.append({
+                            "name": f.stem,
+                            "filename": f.name,
+                            "path": str(f).replace("\\", "/"),
+                        })
+                    for f in sorted(self.lora_dir.glob("*.pt")):
+                        available.append({
+                            "name": f.stem,
+                            "filename": f.name,
+                            "path": str(f).replace("\\", "/"),
+                        })
+            except Exception as e:
+                logger.error(f"get_loras: Failed to scan lora directory: {e}")
+
+            active = (self.uploaded_controlnet_config or {}).get("loras", [])
+            return JSONResponse({
+                "available": available,
+                "active": active,
+                "lora_dir": str(self.lora_dir).replace("\\", "/"),
+            })
+
+        @self.app.post("/api/loras")
+        async def update_loras(request: Request):
+            """Update the active LoRA list. Triggers pipeline reload on next stream start."""
+            data = await request.json()
+            loras = data.get("loras", [])
+
+            validated = []
+            for entry in loras:
+                if not isinstance(entry, dict) or "path" not in entry:
+                    raise HTTPException(status_code=400, detail="Each LoRA entry must have a 'path' field")
+                validated.append({
+                    "path": str(entry["path"]),
+                    "scale": float(entry.get("scale", 1.0)),
+                    "enabled": bool(entry.get("enabled", True)),
+                    "trigger_word": str(entry.get("trigger_word", "")).strip(),
+                })
+
+            if self.uploaded_controlnet_config is None:
+                raise HTTPException(status_code=400, detail="No config loaded — load a YAML config first via the Load Config button")
+
+            self.uploaded_controlnet_config["loras"] = validated
+            if self.runtime_controlnet_config is not None:
+                self.runtime_controlnet_config["loras"] = validated
+            self.config_needs_reload = True
+
+            # Collect trigger words from all enabled loras
+            trigger_words = [e["trigger_word"] for e in validated if e["enabled"] and e["trigger_word"]]
+            self.lora_trigger_words = ", ".join(trigger_words)
+            logger.info(f"update_loras: Updated LoRA list ({len(validated)} entries), trigger_words={self.lora_trigger_words!r}, pipeline will reload")
+
+            return JSONResponse({
+                "status": "success",
+                "message": f"LoRA list updated ({len(validated)} LoRA{'s' if len(validated) != 1 else ''}). Pipeline will restart on next stream start.",
+                "loras": validated,
+            })
 
         # Individual parameter update endpoints for input controls
         @self.app.post("/api/update-guidance-scale")
@@ -2098,7 +2493,10 @@ class App:
                 for name, value in preprocessor_params.items():
                     if hasattr(target_preproc, name):
                         setattr(target_preproc, name, value)
-                
+
+                # Clear colour-match reference so the rolling EMA adapts to the new look
+                self.color_match_reference = None
+
                 return JSONResponse({
                     "status": "success",
                     "message": "Successfully updated preprocessor parameters",
@@ -2562,6 +2960,7 @@ class App:
                 "running": running,
                 "video_path": self.virtcam_video_path if running else None,
                 "video_name": Path(self.virtcam_video_path).name if running and self.virtcam_video_path else None,
+                "speed": self.virtcam_speed,
             })
 
         @self.app.post("/api/virtcam/start")
@@ -2569,6 +2968,7 @@ class App:
             """Start virtcam.py with the given video file path."""
             body = await request.json()
             video_path = body.get("video_path", "").strip()
+            speed = max(1, min(5, int(body.get("speed", self.virtcam_speed))))
             if not video_path:
                 raise HTTPException(status_code=400, detail="video_path is required")
             if not Path(video_path).exists():
@@ -2585,14 +2985,38 @@ class App:
                     self.virtcam_process.kill()
 
             import subprocess as _sp
+            self.virtcam_speed = speed
             self.virtcam_process = _sp.Popen(
-                [sys.executable, str(self._virtcam_script), video_path],
+                [sys.executable, str(self._virtcam_script), video_path, "--speed", str(speed)],
                 stdout=_sp.DEVNULL,
                 stderr=_sp.DEVNULL,
             )
             self.virtcam_video_path = video_path
-            logger.info(f"virtcam started: {video_path} (pid {self.virtcam_process.pid})")
-            return JSONResponse({"status": "started", "video_path": video_path, "pid": self.virtcam_process.pid})
+            logger.info(f"virtcam started: {video_path} speed={speed} (pid {self.virtcam_process.pid})")
+            return JSONResponse({"status": "started", "video_path": video_path, "speed": speed, "pid": self.virtcam_process.pid})
+
+        @self.app.post("/api/virtcam/speed")
+        async def set_virtcam_speed(request: Request):
+            """Change playback speed while running; restarts the subprocess."""
+            body = await request.json()
+            speed = max(1, min(5, int(body.get("speed", 1))))
+            self.virtcam_speed = speed
+
+            if self.virtcam_process and self.virtcam_process.poll() is None and self.virtcam_video_path:
+                import subprocess as _sp
+                self.virtcam_process.terminate()
+                try:
+                    self.virtcam_process.wait(timeout=3)
+                except Exception:
+                    self.virtcam_process.kill()
+                self.virtcam_process = _sp.Popen(
+                    [sys.executable, str(self._virtcam_script), self.virtcam_video_path, "--speed", str(speed)],
+                    stdout=_sp.DEVNULL,
+                    stderr=_sp.DEVNULL,
+                )
+                logger.info(f"virtcam speed changed to {speed} (pid {self.virtcam_process.pid})")
+
+            return JSONResponse({"status": "ok", "speed": speed})
 
         @self.app.post("/api/virtcam/stop")
         async def stop_virtcam():
@@ -2789,8 +3213,9 @@ class App:
         config_for_prompts = self.runtime_controlnet_config if self.runtime_controlnet_config else self.uploaded_controlnet_config
         normalized_prompt_config = self._normalize_prompt_config(config_for_prompts)
         if normalized_prompt_config:
-            # Convert to tuple format and set up prompt blending
-            prompt_tuples = [(item[0], item[1]) for item in normalized_prompt_config]
+            prompt_tuples = [(self._inject_trigger_words(item[0]), item[1]) for item in normalized_prompt_config]
+            if self.lora_trigger_words:
+                logger.info(f"_create_pipeline_with_config: injected trigger words into {len(prompt_tuples)} prompt(s)")
             new_pipeline.stream.update_prompt(prompt_tuples, prompt_interpolation_method="slerp")
         else:
             # Fallback to default single prompt
@@ -2995,6 +3420,14 @@ class App:
                 pass
         
         return ipadapter_info
+
+    def _inject_trigger_words(self, prompt_text: str) -> str:
+        """Prepend active LoRA trigger words to a prompt, skipping if already present."""
+        if not self.lora_trigger_words:
+            return prompt_text
+        if self.lora_trigger_words.lower() in prompt_text.lower():
+            return prompt_text
+        return f"{self.lora_trigger_words}, {prompt_text}"
 
     def _calculate_aspect_ratio(self, width: int, height: int) -> str:
         """Calculate and return aspect ratio as a string"""
